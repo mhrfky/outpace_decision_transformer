@@ -1,0 +1,30 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+
+
+        {
+            "name": "Python: Custom",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/outpace_train.py",
+            "console": "integratedTerminal",
+            "args": ["env=PointUMaze-v0","aim_disc_replay_buffer_capacity=10000","save_buffer=true","adam_eps=0.01"],
+            "env": {"CUDA_VISIBLE_DEVICES" : "0"}
+            // "justMyCode": true
+        },
+        {
+            "name": "Python: Debug Custom",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/outpace_train.py",
+            "console": "integratedTerminal",
+            "args": ["env=PointUMaze-v0","aim_disc_replay_buffer_capacity=10000","save_buffer=true","adam_eps=0.01"],
+            // "env": {"CUDA_VISIBLE_DEVICES" : "0"},
+            // "justMyCode": true
+        }
+    ]
+}

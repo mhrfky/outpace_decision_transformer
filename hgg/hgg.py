@@ -123,7 +123,7 @@ class MatchSampler:
 			raise NotImplementedError
 
 		return goal.copy()
-
+ 
 	def sample(self, idx):
 		if self.add_noise_to_goal:
 			if self.env_name in ['AntMazeSmall-v0', 'PointUMaze-v0', "PointSpiralMaze-v0", "PointNMaze-v0"]:
@@ -135,15 +135,53 @@ class MatchSampler:
 			return self.add_noise(self.pool[idx], noise_std = noise_std)
 		else:
 			return self.pool[idx].copy()
-
+	
+	def generate_achieved_value(self,achieved_pool_init_state,achieved_pool):
+		achieved_value = []		
+		for i in range(len(achieved_pool)):
+			 # maybe for all timesteps in an episode
+			obs = [goal_concat(achieved_pool_init_state[i], achieved_pool[i][j]) for  j in range(achieved_pool[i].shape[0])] # list of [dim] (len = ts)
+																															 # merge of achieved_pool and achieved_pool_init_state to draw trajectory
+			
+			with torch.no_grad(): ## when using no_grad, no gradients will be calculated or stored for operations on tensors, which can reduce memory usage and speed up computations				
+				obs_t = torch.from_numpy(np.stack(obs, axis =0)).float().to(self.device) #[ts, dim]				
+				if (self.agent.aim_discriminator is not None) and ('aim_f' in self.cost_type): # or value function is proxy for aim outputs
+					value = -self.agent.aim_discriminator(obs_t).detach().cpu().numpy()[:, 0] # TODO discover inside aim_discriminator,
+																							  # 	* what kind of inputs it does require
+																							  # 	* value can be interpreted as a measure of how desirable or advantageous the current state is from the perspective of achieving the final goal
+																							
+					# value = np.clip(value, -1.0/(1.0-self.gamma), 0)
+			if 'aim_f' in self.cost_type:				
+				achieved_value.append(value.copy())			
+			elif 'meta_nml' in self.cost_type:			
+				pass			
+			else:
+				raise NotImplementedError
+		return achieved_value
+	def normalize_achieved_value(self,achieved_value):
+		if 'aim_f' in self.cost_type: #normalizing achieved_values
+			# print('normalize aim output in hgg update!')
+			# For considering different traj length
+			aim_outputs_max = -np.inf
+			aim_outputs_min = np.inf
+			for i in range(len(achieved_value)): # list of aim_output [ts,]
+				if achieved_value[i].max() > aim_outputs_max:
+					aim_outputs_max = achieved_value[i].max()
+				if achieved_value[i].min() < aim_outputs_min:
+					aim_outputs_min = achieved_value[i].min()
+			for i in range(len(achieved_value)):
+				achieved_value[i] = ((achieved_value[i]-aim_outputs_min)/(aim_outputs_max - aim_outputs_min+0.00001)-0.5)*2 #[0, 1] -> [-1,1]
 	def update(self, initial_goals, desired_goals, replay_buffer = None, meta_nml_epoch = 0):
+		
 		if self.achieved_trajectory_pool.counter==0:
 			self.pool = copy.deepcopy(desired_goals)
 			return
-
-		achieved_pool, achieved_pool_init_state = self.achieved_trajectory_pool.pad()
+		
+		#achieved pool has the whole trajectory throughtout the episode, while achieved_pool_init_state has the initial state where it started the episode
+		achieved_pool, achieved_pool_init_state = self.achieved_trajectory_pool.pad() # dont care about pad, it receives the stored achieved trajectories
 		# for meta nml computational efficiency, jump 5% of max timesteps
-		if 'meta_nml' in self.cost_type:
+		## there is no process done by meta-nml here to replace with decision transformer
+		if 'meta_nml' in self.cost_type: # shortens every tracjectory inside achieved_pool 
 			if self.split_type_for_meta_nml=='uniform':
 				# uniform split
 				achieved_pool = [traj[::int(self.max_episode_timesteps*self.split_ratio_for_meta_nml)] for traj in achieved_pool] # list of reduced ts			
@@ -161,67 +199,15 @@ class MatchSampler:
 			
 
 		assert len(achieved_pool)>=self.length, 'If not, errors at assert match_count==self.length, e.g. len(achieved_pool)=5, self.length=25, match_count=5'
-		if 'aim_f' in self.cost_type:
+		if 'aim_f' in self.cost_type: 
 			assert self.agent.aim_discriminator is not None
 		candidate_goals = []
 		candidate_edges = []
 		candidate_id = []
 
 		
-		achieved_value = []		
-		for i in range(len(achieved_pool)):
-			 # maybe for all timesteps in an episode
-			obs = [goal_concat(achieved_pool_init_state[i], achieved_pool[i][j]) for  j in range(achieved_pool[i].shape[0])] # list of [dim] (len = ts)
-			
-			with torch.no_grad():				
-				obs_t = torch.from_numpy(np.stack(obs, axis =0)).float().to(self.device) #[ts, dim]				
-				if self.vf is not None:
-					value = self.vf(obs_t).detach().cpu().numpy()[:,0]
-					value = np.clip(value, -1.0/(1.0-self.gamma), 0)
-				elif self.critic is not None and self.policy is not None:
-					n_sample = 10
-					tiled_obs_t = torch.tile(obs_t, (n_sample, 1, 1)).view((-1, obs_t.shape[-1])) #[ts, dim] -> [n_sample*ts, dim]
-					dist = self.policy(obs_t) # obs : [ts, dim]
-					action = dist.rsample((n_sample,)) # [n_sample, ts, dim]
-					action = action.view((-1, action.shape[-1])) # [n_sample*ts, dim]
-					actor_Q1, actor_Q2 = self.critic(tiled_obs_t, action)
-					actor_Q = torch.min(actor_Q1, actor_Q2).view(n_sample, -1, actor_Q1.shape[-1]) # [n_sample*ts, dim(1)] -> [n_sample, ts, dim(1)] 
-					value = torch.mean(actor_Q, dim = 0).detach().cpu().numpy()[:,0] #[ts, dim(1)] -> [ts,]
-					value = np.clip(value, -1.0/(1.0-self.gamma), 0)
-				elif (self.agent.aim_discriminator is not None) and ('aim_f' in self.cost_type): # or value function is proxy for aim outputs
-					value = -self.agent.aim_discriminator(obs_t).detach().cpu().numpy()[:, 0]
-					# value = np.clip(value, -1.0/(1.0-self.gamma), 0)
-			if 'aim_f' in self.cost_type:				
-				achieved_value.append(value.copy())			
-			elif 'meta_nml' in self.cost_type:			
-				pass			
-			else:
-				raise NotImplementedError
-
-
-		n = 0
-		graph_id = {'achieved':[],'desired':[]}
-		for i in range(len(achieved_pool)):
-			n += 1
-			graph_id['achieved'].append(n)
-		for i in range(len(desired_goals)):
-			n += 1
-			graph_id['desired'].append(n)
-		n += 1
-		self.match_lib.clear(n)
-  
-		if 'aim_f' in self.cost_type:
-			# print('normalize aim output in hgg update!')
-			# For considering different traj length
-			aim_outputs_max = -np.inf
-			aim_outputs_min = np.inf
-			for i in range(len(achieved_value)): # list of aim_output [ts,]
-				if achieved_value[i].max() > aim_outputs_max:
-					aim_outputs_max = achieved_value[i].max()
-				if achieved_value[i].min() < aim_outputs_min:
-					aim_outputs_min = achieved_value[i].min()
-			for i in range(len(achieved_value)):
-				achieved_value[i] = ((achieved_value[i]-aim_outputs_min)/(aim_outputs_max - aim_outputs_min+0.00001)-0.5)*2 #[0, 1] -> [-1,1]
+		achieved_value = self.generate_achieved_value(achieved_pool_init_state,achieved_pool)
+		self.normalize_achieved_value(achieved_value)
 
 		if 'meta_nml' in self.cost_type:
 
@@ -240,6 +226,19 @@ class MatchSampler:
 					start_idx = end_idx 
 					end_idx = start_idx+length
 				classification_probs.append(torch.from_numpy(reshaped_classification_probs[start_idx:end_idx]).squeeze().float().to(self.device)) # list of [ts, dim(1)] or [ts]
+
+
+		n = 0
+		graph_id = {'achieved':[],'desired':[]}
+		for i in range(len(achieved_pool)):
+			n += 1
+			graph_id['achieved'].append(n)
+		for i in range(len(desired_goals)):
+			n += 1
+			graph_id['desired'].append(n)
+		n += 1
+		self.match_lib.clear(n)
+  
 
 
 		for i in range(len(achieved_pool)):

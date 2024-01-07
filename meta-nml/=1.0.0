@@ -1,0 +1,4 @@
+Requirement already satisfied: pluggy in /home/octopy/miniconda3/envs/outpace/lib/python3.7/site-packages (1.2.0)
+Requirement already satisfied: importlib-metadata>=0.12 in /home/octopy/miniconda3/envs/outpace/lib/python3.7/site-packages (from pluggy) (6.7.0)
+Requirement already satisfied: zipp>=0.5 in /home/octopy/miniconda3/envs/outpace/lib/python3.7/site-packages (from importlib-metadata>=0.12->pluggy) (3.15.0)
+Requirement already satisfied: typing-extensions>=3.6.4 in /home/octopy/miniconda3/envs/outpace/lib/python3.7/site-packages (from importlib-metadata>=0.12->pluggy) (4.7.1)

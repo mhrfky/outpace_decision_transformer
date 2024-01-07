@@ -274,14 +274,12 @@ class Workspace(object):
 
         
         cfg.agent.action_shape = action_spec.shape
-        
-
-        
         cfg.agent.action_range = [
             float(action_spec.low.min()),
             float(action_spec.high.max())
         ]
-            
+        cfg.agent.obs_shape = obs_spec.shape
+        cfg.agent.goal_dim = self.env.goal_dim
         
             
         self.max_episode_timesteps = cfg.max_episode_timesteps
@@ -291,14 +289,7 @@ class Workspace(object):
       
             
 
-        if cfg.use_meta_nml:
-            if cfg.meta_nml.num_finetuning_layers in [None, 'none', 'None']:
-                cfg.meta_nml.num_finetuning_layers = None
-            if cfg.meta_nml_kwargs.meta_nml_custom_embedding_key in [None, 'none', 'None']:
-                cfg.meta_nml_kwargs.meta_nml_custom_embedding_key = None
-            
-        cfg.meta_nml.equal_pos_neg_test= cfg.meta_nml_kwargs.equal_pos_neg_test and (not cfg.meta_nml_kwargs.meta_nml_negatives_only)
-        cfg.meta_nml.input_dim = self.env.goal_dim
+        self.meta_nml_init(cfg)
         
         if cfg.env in ['sawyer_door', 'sawyer_peg']:      
             if cfg.aim_kwargs.aim_input_type=='default':
@@ -323,13 +314,36 @@ class Workspace(object):
             
 
         
-        cfg.agent.goal_dim = self.env.goal_dim
 
-        cfg.agent.obs_shape = obs_spec.shape
         # exploration agent uses intrinsic reward
         self.expl_agent = hydra.utils.instantiate(cfg.agent)
         
             
+        self.init_buffers(cfg, obs_spec, action_spec)
+        if cfg.use_hgg:
+            from hgg.hgg import TrajectoryPool, MatchSampler            
+            self.hgg_achieved_trajectory_pool = TrajectoryPool(**cfg.hgg_kwargs.trajectory_pool_kwargs)
+            self.hgg_sampler = MatchSampler(goal_env=self.eval_env, 
+                                            goal_eval_env = self.eval_env, 
+                                            env_name=cfg.env,
+                                            achieved_trajectory_pool = self.hgg_achieved_trajectory_pool,
+                                            agent = self.expl_agent,
+                                            **cfg.hgg_kwargs.match_sampler_kwargs
+                                            )                
+       
+            
+        self.init_video_recorders(cfg)
+        self.step = 0
+        
+        
+        self.uniform_goal_sampler =  UniformFeasibleGoalSampler(env_name=cfg.env)
+
+    def init_video_recorders(self, cfg):
+        self.eval_video_recorder = VideoRecorder(self.work_dir if cfg.save_video else None, dmc_env=False, env_name=cfg.env)
+        self.train_video_recorder = VideoRecorder(self.work_dir if cfg.save_video else None, dmc_env=False, env_name=cfg.env)
+        self.train_video_recorder.init(enabled=False)
+
+    def init_buffers(self, cfg, obs_spec, action_spec):
         self.expl_buffer = ReplayBuffer(obs_spec.shape, action_spec.shape,
                                         cfg.replay_buffer_capacity,
                                         self.device)
@@ -367,25 +381,16 @@ class Workspace(object):
                                                             env_name = cfg.env,
                                                             consider_done_true = cfg.done_on_success,
                                                             )
-        if cfg.use_hgg:
-            from hgg.hgg import TrajectoryPool, MatchSampler            
-            self.hgg_achieved_trajectory_pool = TrajectoryPool(**cfg.hgg_kwargs.trajectory_pool_kwargs)
-            self.hgg_sampler = MatchSampler(goal_env=self.eval_env, 
-                                            goal_eval_env = self.eval_env, 
-                                            env_name=cfg.env,
-                                            achieved_trajectory_pool = self.hgg_achieved_trajectory_pool,
-                                            agent = self.expl_agent,
-                                            **cfg.hgg_kwargs.match_sampler_kwargs
-                                            )                
-       
+
+    def meta_nml_init(self, cfg):
+        if cfg.use_meta_nml:
+            if cfg.meta_nml.num_finetuning_layers in [None, 'none', 'None']:
+                cfg.meta_nml.num_finetuning_layers = None
+            if cfg.meta_nml_kwargs.meta_nml_custom_embedding_key in [None, 'none', 'None']:
+                cfg.meta_nml_kwargs.meta_nml_custom_embedding_key = None
             
-        self.eval_video_recorder = VideoRecorder(self.work_dir if cfg.save_video else None, dmc_env=False, env_name=cfg.env)
-        self.train_video_recorder = VideoRecorder(self.work_dir if cfg.save_video else None, dmc_env=False, env_name=cfg.env)
-        self.train_video_recorder.init(enabled=False)
-        self.step = 0
-        
-        
-        self.uniform_goal_sampler =  UniformFeasibleGoalSampler(env_name=cfg.env)
+        cfg.meta_nml.equal_pos_neg_test= cfg.meta_nml_kwargs.equal_pos_neg_test and (not cfg.meta_nml_kwargs.meta_nml_negatives_only)
+        cfg.meta_nml.input_dim = self.env.goal_dim
 
 
     def get_agent(self):                
@@ -529,50 +534,8 @@ class Workspace(object):
         self._run()
     
     def _run(self):        
-        episode, episode_reward, episode_step = 0, 0, 0
-        inv_curriculum_pocket = []
-        start_time = time.time()
-
-        if self.cfg.use_hgg:
-            recent_sampled_goals = Queue(self.cfg.hgg_kwargs.match_sampler_kwargs.num_episodes)
-        
-
-
-        previous_goals = None
-        done = True
-        info = {}
-
-        
-        if self.cfg.use_meta_nml:                
-            if self.cfg.env in ['AntMazeSmall-v0', "PointUMaze-v0"]:  
-                final_goal_states = np.tile(np.array([0., 8.]), (self.cfg.aim_num_precollect_init_state,1))
-                final_goal_states += np.random.normal(loc=np.zeros_like(final_goal_states), scale=0.5*np.ones_like(final_goal_states))
-            elif self.cfg.env  == "PointSpiralMaze-v0":
-                final_goal_states = np.tile(np.array([8., -8.]), (self.cfg.aim_num_precollect_init_state,1))
-                final_goal_states += np.random.normal(loc=np.zeros_like(final_goal_states), scale=0.5*np.ones_like(final_goal_states))
-            elif self.cfg.env in ["PointNMaze-v0"]:
-                final_goal_states = np.tile(np.array([8., 16.]), (self.cfg.aim_num_precollect_init_state,1))
-                final_goal_states += np.random.normal(loc=np.zeros_like(final_goal_states), scale=0.5*np.ones_like(final_goal_states))
-            elif self.cfg.env in [    'sawyer_peg_push' ]:
-                final_goal_states = np.tile(np.array([-0.3, 0.4, 0.02]), (self.cfg.aim_num_precollect_init_state,1))
-                noise = np.random.normal(loc=np.zeros_like(final_goal_states), scale=0.05*np.ones_like(final_goal_states))
-                noise[2] = 0
-                final_goal_states += noise
-            elif self.cfg.env in ['sawyer_peg_pick_and_place']:
-                final_goal_states = np.tile(np.array([-0.3, 0.4, 0.2]), (self.cfg.aim_num_precollect_init_state,1))
-                final_goal_states += np.random.normal(loc=np.zeros_like(final_goal_states), scale=0.05*np.ones_like(final_goal_states))
-            else:
-                raise NotImplementedError
-            agent = self.get_agent()
-            agent.final_goal_states = final_goal_states.copy()
-
-        if self.cfg.use_hgg:
-            temp_obs = self.eval_env.reset()        
-            recent_sampled_goals.put(self.eval_env.convert_obs_to_dict(temp_obs)['achieved_goal'].copy())
-
-
-        current_pocket_success = 0
-        current_pocket_trial = 0
+        episode, episode_reward, episode_step, start_time, recent_sampled_goals, done, info, current_pocket_success, current_pocket_trial = self.run_init()
+        agent = self.get_agent()
         while self.step <= self.cfg.num_train_steps:
             
             if done:
@@ -609,7 +572,7 @@ class Workspace(object):
                                 desired_goals.append(goal_d.copy()) 
                             hgg_start_time = time.time()
                             hgg_sampler = self.hgg_sampler
-                            hgg_sampler.update(initial_goals, desired_goals, replay_buffer = self.expl_buffer, meta_nml_epoch=episode)
+                            hgg_sampler.update(initial_goals, desired_goals, replay_buffer = self.expl_buffer, meta_nml_epoch=episode) # dont think about initial_goals, they are not used
                             # print('hgg sampler update step : {} time : {}'.format(self.step, time.time() - hgg_start_time))
                     
 
@@ -976,6 +939,56 @@ class Workspace(object):
                 if (episode_step) % self.max_episode_timesteps == 0: #done only horizon ends
                     done = True
                     info['is_success'] = self.env.original_goal_success
+
+    def run_init(self):
+        episode, episode_reward, episode_step = 0, 0, 0
+        inv_curriculum_pocket = []
+        start_time = time.time()
+
+        if self.cfg.use_hgg:
+            recent_sampled_goals = Queue(self.cfg.hgg_kwargs.match_sampler_kwargs.num_episodes)
+        
+
+
+        previous_goals = None
+        done = True
+        info = {}
+
+        
+        self.meta_nml_run_init()
+
+        if self.cfg.use_hgg:
+            temp_obs = self.eval_env.reset()        
+            recent_sampled_goals.put(self.eval_env.convert_obs_to_dict(temp_obs)['achieved_goal'].copy())
+
+
+        current_pocket_success = 0
+        current_pocket_trial = 0
+        return episode,episode_reward,episode_step,start_time,recent_sampled_goals,done,info,current_pocket_success,current_pocket_trial
+
+    def meta_nml_run_init(self):
+        if self.cfg.use_meta_nml:                
+            if self.cfg.env in ['AntMazeSmall-v0', "PointUMaze-v0"]:  
+                final_goal_states = np.tile(np.array([0., 8.]), (self.cfg.aim_num_precollect_init_state,1))
+                final_goal_states += np.random.normal(loc=np.zeros_like(final_goal_states), scale=0.5*np.ones_like(final_goal_states))
+            elif self.cfg.env  == "PointSpiralMaze-v0":
+                final_goal_states = np.tile(np.array([8., -8.]), (self.cfg.aim_num_precollect_init_state,1))
+                final_goal_states += np.random.normal(loc=np.zeros_like(final_goal_states), scale=0.5*np.ones_like(final_goal_states))
+            elif self.cfg.env in ["PointNMaze-v0"]:
+                final_goal_states = np.tile(np.array([8., 16.]), (self.cfg.aim_num_precollect_init_state,1))
+                final_goal_states += np.random.normal(loc=np.zeros_like(final_goal_states), scale=0.5*np.ones_like(final_goal_states))
+            elif self.cfg.env in [    'sawyer_peg_push' ]:
+                final_goal_states = np.tile(np.array([-0.3, 0.4, 0.02]), (self.cfg.aim_num_precollect_init_state,1))
+                noise = np.random.normal(loc=np.zeros_like(final_goal_states), scale=0.05*np.ones_like(final_goal_states))
+                noise[2] = 0
+                final_goal_states += noise
+            elif self.cfg.env in ['sawyer_peg_pick_and_place']:
+                final_goal_states = np.tile(np.array([-0.3, 0.4, 0.2]), (self.cfg.aim_num_precollect_init_state,1))
+                final_goal_states += np.random.normal(loc=np.zeros_like(final_goal_states), scale=0.05*np.ones_like(final_goal_states))
+            else:
+                raise NotImplementedError
+            self.get_agent().final_goal_states = final_goal_states.copy()
+            
 
 
                     

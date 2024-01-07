@@ -8,3 +8,9 @@ test.*
 *.jpg
 config/paths/config_path.yaml
 figures/
+*.so
+*.log
+*.md
+*.pt
+*.pkl
+/target/
