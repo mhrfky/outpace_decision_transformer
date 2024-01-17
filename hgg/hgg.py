@@ -171,6 +171,40 @@ class MatchSampler:
 					aim_outputs_min = achieved_value[i].min()
 			for i in range(len(achieved_value)):
 				achieved_value[i] = ((achieved_value[i]-aim_outputs_min)/(aim_outputs_max - aim_outputs_min+0.00001)-0.5)*2 #[0, 1] -> [-1,1]
+	def meta_nml_shorten_trajectory(self,achieved_pool):
+		if self.split_type_for_meta_nml=='uniform':
+			# uniform split
+			achieved_pool = [traj[::int(self.max_episode_timesteps*self.split_ratio_for_meta_nml)] for traj in achieved_pool] # list of reduced ts			
+			raise NotImplementedError
+		elif self.split_type_for_meta_nml=='last':
+			# uniform split on last N steps
+			if self.env_name in ['AntMazeSmall-v0']:
+				interval = 6
+			elif self.env_name in ['PointUMaze-v0', 'sawyer_peg_push', 'sawyer_peg_pick_and_place', "PointNMaze-v0", "PointSpiralMaze-v0"]:
+				interval = 4
+			else:
+				raise NotImplementedError
+			achieved_pool = [np.concatenate([traj[int(-self.split_ratio_for_meta_nml*self.max_episode_timesteps)::interval], traj[-1:]], axis=0) for traj in achieved_pool] # list of reduced ts			
+		return achieved_pool
+	
+	def meta_nml_generate_reshaped_classification_probs(self,achieved_pool,meta_nml_epoch,replay_buffer):
+		# achieved_pool : list of [ts, dim] (ts could be different)
+		achieved_pool_traj_lengths = [traj.shape[0] for traj in achieved_pool] # list of ts			
+		reshaped_achieved_pool = np.concatenate([traj for traj in achieved_pool], axis =0) # [ts_1+ts_2+ ... , dim]
+		start = time.time()
+		reshaped_classification_probs = self.agent.get_prob_by_meta_nml(reshaped_achieved_pool, meta_nml_epoch, replay_buffer=replay_buffer, goal_env=self.eval_env)			
+		# print('meta evaluation time in hgg update : ', time.time() - start)
+		classification_probs = []			
+		for idx, length in enumerate(achieved_pool_traj_lengths):
+			if idx ==0 :
+				start_idx = 0 
+				end_idx = length
+			else:
+				start_idx = end_idx 
+				end_idx = start_idx+length
+			classification_probs.append(torch.from_numpy(reshaped_classification_probs[start_idx:end_idx]).squeeze().float().to(self.device)) # list of [ts, dim(1)] or [ts]
+		return classification_probs
+	
 	def update(self, initial_goals, desired_goals, replay_buffer = None, meta_nml_epoch = 0):
 		
 		if self.achieved_trajectory_pool.counter==0:
@@ -182,52 +216,83 @@ class MatchSampler:
 		# for meta nml computational efficiency, jump 5% of max timesteps
 		## there is no process done by meta-nml here to replace with decision transformer
 		if 'meta_nml' in self.cost_type: # shortens every tracjectory inside achieved_pool 
-			if self.split_type_for_meta_nml=='uniform':
-				# uniform split
-				achieved_pool = [traj[::int(self.max_episode_timesteps*self.split_ratio_for_meta_nml)] for traj in achieved_pool] # list of reduced ts			
-				raise NotImplementedError
-			elif self.split_type_for_meta_nml=='last':
-				# uniform split on last N steps
-				if self.env_name in ['AntMazeSmall-v0']:
-					interval = 6
-				elif self.env_name in ['PointUMaze-v0', 'sawyer_peg_push', 'sawyer_peg_pick_and_place', "PointNMaze-v0", "PointSpiralMaze-v0"]:
-					interval = 4
-				else:
-					raise NotImplementedError
-				achieved_pool = [np.concatenate([traj[int(-self.split_ratio_for_meta_nml*self.max_episode_timesteps)::interval], traj[-1:]], axis=0) for traj in achieved_pool] # list of reduced ts			
-			
-			
+			self.meta_nml_shorten_trajectory(achieved_pool=achieved_pool)
 
 		assert len(achieved_pool)>=self.length, 'If not, errors at assert match_count==self.length, e.g. len(achieved_pool)=5, self.length=25, match_count=5'
 		if 'aim_f' in self.cost_type: 
 			assert self.agent.aim_discriminator is not None
+
+
 		candidate_goals = []
 		candidate_edges = []
 		candidate_id = []
-
-		
 		achieved_value = self.generate_achieved_value(achieved_pool_init_state,achieved_pool)
 		self.normalize_achieved_value(achieved_value)
 
 		if 'meta_nml' in self.cost_type:
+			classification_probs =self.meta_nml_generate_reshaped_classification_probs(meta_nml_epoch=meta_nml_epoch,replay_buffer=replay_buffer)
 
-			# achieved_pool : list of [ts, dim] (ts could be different)
-			achieved_pool_traj_lengths = [traj.shape[0] for traj in achieved_pool] # list of ts			
-			reshaped_achieved_pool = np.concatenate([traj for traj in achieved_pool], axis =0) # [ts_1+ts_2+ ... , dim]
-			start = time.time()
-			reshaped_classification_probs = self.agent.get_prob_by_meta_nml(reshaped_achieved_pool, meta_nml_epoch, replay_buffer=replay_buffer, goal_env=self.eval_env)			
-			# print('meta evaluation time in hgg update : ', time.time() - start)
-			classification_probs = []			
-			for idx, length in enumerate(achieved_pool_traj_lengths):
-				if idx ==0 :
-					start_idx = 0 
-					end_idx = length
-				else:
-					start_idx = end_idx 
-					end_idx = start_idx+length
-				classification_probs.append(torch.from_numpy(reshaped_classification_probs[start_idx:end_idx]).squeeze().float().to(self.device)) # list of [ts, dim(1)] or [ts]
+		self.generate_goals(achieved_pool,desired_goals,classification_probs,achieved_value)
+		# n = 0
+		# graph_id = {'achieved':[],'desired':[]}
+		# for i in range(len(achieved_pool)):
+		# 	n += 1
+		# 	graph_id['achieved'].append(n)
+		# for i in range(len(desired_goals)):
+		# 	n += 1
+		# 	graph_id['desired'].append(n)
+		# n += 1
+		# self.match_lib.clear(n)
+  
 
 
+		# for i in range(len(achieved_pool)):
+		# 	self.match_lib.add(0, graph_id['achieved'][i], 1, 0)
+		
+		
+		# for i in range(len(achieved_pool)):
+		# 	# meta_nml uncertainty distance metric, aim_f bias				
+		# 	# cross entropy (when the probability becomes 1 (goal example), the loss is minimized)			
+		# 	if (self.agent.aim_discriminator is not None) and ('aim_f' in self.cost_type) and ('meta_nml' in self.cost_type):
+		# 		labels = torch.ones_like(classification_probs[i]).to(self.device)
+		# 		cross_entropy_loss = self.loss_function(classification_probs[i], labels).detach().cpu().numpy()				
+		# 		res = cross_entropy_loss - achieved_value[i]/(self.hgg_L/self.max_dis/(1-self.gamma))
+		# 	elif (self.agent.aim_discriminator is not None) and ('aim_f' in self.cost_type):
+		# 		res = - achieved_value[i]/(self.hgg_L/self.max_dis/(1-self.gamma))
+		# 	elif ('meta_nml' in self.cost_type):
+		# 		labels = torch.ones_like(classification_probs[i]).to(self.device)
+		# 		cross_entropy_loss = self.loss_function(classification_probs[i], labels).detach().cpu().numpy()
+		# 		res = cross_entropy_loss
+		# 	match_dis = np.min(res)
+
+		# 	for j in range(len(desired_goals)): 
+		# 		if ('aim_f' in self.cost_type) or ('meta_nml' in self.cost_type):
+		# 			pass
+		# 		else: raise NotImplementedError
+
+		# 		match_idx = np.argmin(res)
+
+		# 		edge = self.match_lib.add(graph_id['achieved'][i], graph_id['desired'][j], 1, c_double(match_dis))
+		# 		candidate_goals.append(achieved_pool[i][match_idx])
+		# 		candidate_edges.append(edge)
+		# 		candidate_id.append(j)
+		# for i in range(len(desired_goals)):
+		# 	self.match_lib.add(graph_id['desired'][i], n, 1, 0)
+
+		# match_count = self.match_lib.cost_flow(0,n)
+		# assert match_count==self.length
+
+		# explore_goals = [0]*self.length
+		# for i in range(len(candidate_goals)):
+		# 	if self.match_lib.check_match(candidate_edges[i])==1:
+		# 		explore_goals[candidate_id[i]] = candidate_goals[i].copy()
+		# assert len(explore_goals)==self.length
+		# self.pool = np.array(explore_goals)
+
+	def generate_goals(self,achieved_pool,desired_goals,classification_probs,achieved_value):
+		candidate_goals = []
+		candidate_edges = []
+		candidate_id = []
 		n = 0
 		graph_id = {'achieved':[],'desired':[]}
 		for i in range(len(achieved_pool)):
@@ -283,4 +348,5 @@ class MatchSampler:
 				explore_goals[candidate_id[i]] = candidate_goals[i].copy()
 		assert len(explore_goals)==self.length
 		self.pool = np.array(explore_goals)
+
 

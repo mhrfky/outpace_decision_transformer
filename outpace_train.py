@@ -185,6 +185,45 @@ class Workspace(object):
         utils.set_seed_everywhere(cfg.seed)
         self.device = torch.device(cfg.device)
 
+        obs_spec, action_spec = self.init_env(cfg)
+            
+
+        
+        self.set_cfg_agent(cfg, obs_spec, action_spec)
+        
+            
+        self.max_episode_timesteps = cfg.max_episode_timesteps
+        
+        if cfg.aim_discriminator_cfg.output_activation in [None, 'none', 'None']:
+            cfg.aim_discriminator_cfg.output_activation = None
+      
+            
+
+        self.meta_nml_init(cfg)
+        
+        self.init_feature_dim_for_discriminator_actor_critic(cfg)
+        
+            
+
+        
+
+        # exploration agent uses intrinsic reward
+        self.expl_agent = hydra.utils.instantiate(cfg.agent)
+        
+            
+        self.init_buffers(cfg, obs_spec, action_spec)
+        if cfg.use_hgg:
+            from hgg.hgg import TrajectoryPool, MatchSampler            
+            self.init_hgg_achieved_trajectory_pool(cfg)
+            self.init_hgg_sampler(cfg)
+       
+            
+        self.init_video_recorders(cfg)
+        self.step = 0
+        
+        
+        self.uniform_goal_sampler =  UniformFeasibleGoalSampler(env_name=cfg.env)
+    def init_env(self,cfg):
         cfg.max_episode_timesteps = max_episode_timesteps_dict[cfg.env]
         cfg.num_seed_steps = num_seed_steps_dict[cfg.env]
         cfg.num_random_steps = num_random_steps_dict[cfg.env]
@@ -270,9 +309,8 @@ class Workspace(object):
                 
             obs_spec = self.env.observation_spec()
             action_spec = self.env.action_spec()
-            
-
-        
+            return obs_spec, action_spec
+    def set_cfg_agent(self, cfg, obs_spec, action_spec):
         cfg.agent.action_shape = action_spec.shape
         cfg.agent.action_range = [
             float(action_spec.low.min()),
@@ -280,17 +318,21 @@ class Workspace(object):
         ]
         cfg.agent.obs_shape = obs_spec.shape
         cfg.agent.goal_dim = self.env.goal_dim
-        
-            
-        self.max_episode_timesteps = cfg.max_episode_timesteps
-        
-        if cfg.aim_discriminator_cfg.output_activation in [None, 'none', 'None']:
-            cfg.aim_discriminator_cfg.output_activation = None
-      
-            
+    def init_hgg_achieved_trajectory_pool(self,cfg):
+        from hgg.hgg import TrajectoryPool
+        self.hgg_achieved_trajectory_pool = TrajectoryPool(**cfg.hgg_kwargs.trajectory_pool_kwargs)
 
-        self.meta_nml_init(cfg)
-        
+    def init_hgg_sampler(self,cfg):
+        from hgg.hgg import MatchSampler            
+        self.hgg_sampler = MatchSampler(goal_env=self.eval_env, 
+                                            goal_eval_env = self.eval_env, 
+                                            env_name=cfg.env,
+                                            achieved_trajectory_pool = self.hgg_achieved_trajectory_pool,
+                                            agent = self.expl_agent,
+                                            **cfg.hgg_kwargs.match_sampler_kwargs
+                                            )      
+
+    def init_feature_dim_for_discriminator_actor_critic(self,cfg):
         if cfg.env in ['sawyer_door', 'sawyer_peg']:      
             if cfg.aim_kwargs.aim_input_type=='default':
                 cfg.aim_discriminator_cfg.x_dim = (get_object_states_only_from_goal(self.cfg.env, np.ones(self.env.goal_dim)).shape[-1])*2
@@ -314,30 +356,6 @@ class Workspace(object):
             
 
         
-
-        # exploration agent uses intrinsic reward
-        self.expl_agent = hydra.utils.instantiate(cfg.agent)
-        
-            
-        self.init_buffers(cfg, obs_spec, action_spec)
-        if cfg.use_hgg:
-            from hgg.hgg import TrajectoryPool, MatchSampler            
-            self.hgg_achieved_trajectory_pool = TrajectoryPool(**cfg.hgg_kwargs.trajectory_pool_kwargs)
-            self.hgg_sampler = MatchSampler(goal_env=self.eval_env, 
-                                            goal_eval_env = self.eval_env, 
-                                            env_name=cfg.env,
-                                            achieved_trajectory_pool = self.hgg_achieved_trajectory_pool,
-                                            agent = self.expl_agent,
-                                            **cfg.hgg_kwargs.match_sampler_kwargs
-                                            )                
-       
-            
-        self.init_video_recorders(cfg)
-        self.step = 0
-        
-        
-        self.uniform_goal_sampler =  UniformFeasibleGoalSampler(env_name=cfg.env)
-
     def init_video_recorders(self, cfg):
         self.eval_video_recorder = VideoRecorder(self.work_dir if cfg.save_video else None, dmc_env=False, env_name=cfg.env)
         self.train_video_recorder = VideoRecorder(self.work_dir if cfg.save_video else None, dmc_env=False, env_name=cfg.env)
@@ -532,10 +550,40 @@ class Workspace(object):
 
     def run(self):        
         self._run()
-    
+    def hgg_update(self,episode):
+        initial_goals = []
+        desired_goals = []
+        hgg_sampler = self.hgg_sampler
+
+        # collect s_0, g from T*                            
+        for i in range(self.cfg.hgg_kwargs.match_sampler_kwargs.num_episodes):                                
+            temp_obs = self.eval_env.convert_obs_to_dict(self.eval_env.reset())
+            goal_a = temp_obs['achieved_goal'].copy()                                
+            if 'meta_nml' in hgg_sampler.cost_type or 'aim_f' in hgg_sampler.cost_type: 
+                # In this case, desired_goal is not used inside
+                # for preventing initial sampled hgg goals to be final goal
+                if self.cfg.env in ['AntMazeSmall-v0', 'PointUMaze-v0', 'PointNMaze-v0', 'PointSpiralMaze-v0']:
+                    noise_scale = 0.5                    
+                    noise = np.random.normal(loc=np.zeros_like(goal_a), scale=noise_scale*np.ones_like(goal_a))
+                elif self.cfg.env in ['sawyer_peg_push','sawyer_peg_pick_and_place']:
+                    noise_scale = 0.05
+                    noise = np.random.normal(loc=np.zeros_like(goal_a), scale=noise_scale*np.ones_like(goal_a))
+                    noise[2] = 0 # zero out z element to prevent sampling through the table
+                else:
+                    raise NotImplementedError
+                goal_d = goal_a + noise # These will be meaningless after achieved_goals are accumulated in hgg_achieved_trajectory_pool
+            else:
+                raise NotImplementedError
+            initial_goals.append(goal_a.copy())
+            desired_goals.append(goal_d.copy()) 
+        hgg_start_time = time.time()
+        hgg_sampler.update(initial_goals, desired_goals, replay_buffer = self.expl_buffer, meta_nml_epoch=episode) # dont think about initial_goals, they are not used
+        # print('hgg sampler update step : {} time : {}'.format(self.step, time.time() - hgg_start_time))
+
     def _run(self):        
         episode, episode_reward, episode_step, start_time, recent_sampled_goals, done, info, current_pocket_success, current_pocket_trial = self.run_init()
         agent = self.get_agent()
+
         while self.step <= self.cfg.num_train_steps:
             
             if done:
@@ -547,33 +595,7 @@ class Workspace(object):
                     # hgg update
                     if self.cfg.use_hgg :
                         if episode % self.cfg.hgg_kwargs.hgg_sampler_update_frequency ==0 :                            
-                            initial_goals = []
-                            desired_goals = []
-                            # collect s_0, g from T*                            
-                            for i in range(self.cfg.hgg_kwargs.match_sampler_kwargs.num_episodes):                                
-                                temp_obs = self.eval_env.convert_obs_to_dict(self.eval_env.reset())
-                                goal_a = temp_obs['achieved_goal'].copy()                                
-                                if 'meta_nml' in hgg_sampler.cost_type or 'aim_f' in hgg_sampler.cost_type: 
-                                    # In this case, desired_goal is not used inside
-                                    # for preventing initial sampled hgg goals to be final goal
-                                    if self.cfg.env in ['AntMazeSmall-v0', 'PointUMaze-v0', 'PointNMaze-v0', 'PointSpiralMaze-v0']:
-                                        noise_scale = 0.5                    
-                                        noise = np.random.normal(loc=np.zeros_like(goal_a), scale=noise_scale*np.ones_like(goal_a))
-                                    elif self.cfg.env in ['sawyer_peg_push','sawyer_peg_pick_and_place']:
-                                        noise_scale = 0.05
-                                        noise = np.random.normal(loc=np.zeros_like(goal_a), scale=noise_scale*np.ones_like(goal_a))
-                                        noise[2] = 0 # zero out z element to prevent sampling through the table
-                                    else:
-                                        raise NotImplementedError
-                                    goal_d = goal_a + noise # These will be meaningless after achieved_goals are accumulated in hgg_achieved_trajectory_pool
-                                else:
-                                    raise NotImplementedError
-                                initial_goals.append(goal_a.copy())
-                                desired_goals.append(goal_d.copy()) 
-                            hgg_start_time = time.time()
-                            hgg_sampler = self.hgg_sampler
-                            hgg_sampler.update(initial_goals, desired_goals, replay_buffer = self.expl_buffer, meta_nml_epoch=episode) # dont think about initial_goals, they are not used
-                            # print('hgg sampler update step : {} time : {}'.format(self.step, time.time() - hgg_start_time))
+                            self.hgg_update(episode)
                     
 
 
@@ -587,28 +609,7 @@ class Workspace(object):
                     self.logger.log('train/episode_reward', episode_reward, self.step)
                     self.logger.log('train/episode', episode, self.step)
                 
-                if self.cfg.use_hgg:                    
-                    hgg_sampler = self.hgg_sampler
-                    n_iter = 0
-                    while True:
-                        # print('hgg sampler pool len : {} step : {}'.format(len(hgg_sampler.pool), self.step))
-                        sampled_goal = hgg_sampler.sample(np.random.randint(len(hgg_sampler.pool))).copy()                        
-                        obs = self.env.reset(goal = sampled_goal)
-
-                        if not self.env.is_successful(obs):
-                            break
-                        n_iter +=1
-                        if n_iter==10:
-                            break
-
-                    if recent_sampled_goals.full():
-                        recent_sampled_goals.get()
-                    recent_sampled_goals.put(sampled_goal)
-                    # obs = self.env.reset(goal = sampled_goal)
-                    assert (sampled_goal == self.env.goal.copy()).all()
-                else:
-                    agent = self.get_agent()
-                    obs = self.env.reset()
+                obs = self.hgg_sample(recent_sampled_goals)
                 
                 final_goal = self.env.goal.copy()                
                 
@@ -622,73 +623,7 @@ class Workspace(object):
                         
 
 
-                self.train_video_recorder.init(enabled=False)
-                
-                hgg_save_freq = 3 if 'Point' in self.cfg.env else 25
-                if self.cfg.use_hgg and episode % hgg_save_freq == 0 :
-                    sampled_goals_for_vis = np.array(recent_sampled_goals.queue) 
-                    fig = plt.figure()
-                    sns.set_style("darkgrid")
-                    ax1 = fig.add_subplot(1,1,1)                    
-                    ax1.scatter(sampled_goals_for_vis[:, 0], sampled_goals_for_vis[:, 1])
-                    if self.cfg.env in ['AntMazeSmall-v0', "PointUMaze-v0"]:
-                        plt.xlim(-2,10)    
-                        plt.ylim(-2,10)
-                    elif self.cfg.env == "PointSpiralMaze-v0":
-                        plt.xlim(-10,10)    
-                        plt.ylim(-10,10)
-                    elif self.cfg.env in ["PointNMaze-v0"]:
-                        plt.xlim(-2,10)    
-                        plt.ylim(-2,18)
-                    elif self.cfg.env in [     'sawyer_peg_push','sawyer_peg_pick_and_place']:
-                        plt.xlim(-0.6,0.6)    
-                        plt.ylim(0.2,1.0)
-                    else:
-                        raise NotImplementedError
-                    plt.savefig(self.train_video_recorder.save_dir+'/train_hgg_goals_episode_'+str(episode)+'.jpg')
-                    plt.close()
-                    with open(self.train_video_recorder.save_dir+'/train_hgg_goals_episode_'+str(episode)+'.pkl', 'wb') as f:
-                        pkl.dump(sampled_goals_for_vis, f)
-
-
-                if episode % self.cfg.train_episode_video_freq == 0 or episode in [25,50,75,100]:             
-                    self.train_video_recorder.init(enabled=False)           
-                    # Visualize from init state to subgoals
-                   
-
-                    visualize_num_iter = 0
-                    scatter_states = self.env.convert_obs_to_dict(obs.copy())['achieved_goal'][None, :]
-                    
-                    for k in range(visualize_num_iter+1):                                                
-                        init_state = scatter_states[k]
-                        if self.cfg.use_aim:
-                            visualize_discriminator(normalizer = agent.normalize_obs if self.cfg.normalize_f_obs else None,
-                                                    discriminator = agent.aim_discriminator, 
-                                                    initial_state = init_state, 
-                                                    scatter_states = scatter_states.squeeze(),
-                                                    env_name = self.cfg.env, 
-                                                    aim_input_type = self.cfg.aim_kwargs.aim_input_type,
-                                                    device = self.device, 
-                                                    savedir_w_name = self.train_video_recorder.save_dir + '/aim_f_visualize_train_episode_'+str(episode)+'_s'+str(k),
-                                                    )
-
-                            visualize_discriminator2(normalizer = agent.normalize_obs if self.cfg.normalize_f_obs else None,
-                                                    discriminator = agent.aim_discriminator, 
-                                                    env_name = self.cfg.env, 
-                                                    aim_input_type = self.cfg.aim_kwargs.aim_input_type,
-                                                    device = self.device, 
-                                                    savedir_w_name = self.train_video_recorder.save_dir + '/aim_f_visualize_train_goalfix_'+str(episode)+'_s'+str(k),
-                                                    )
-                        if self.cfg.use_meta_nml:
-                            visualize_meta_nml(agent=agent, 
-                                               meta_nml_epoch=episode, 
-                                               scatter_states = scatter_states.squeeze(),
-                                               replay_buffer= self.get_buffer(), 
-                                               goal_env = self.env,
-                                               env_name = self.cfg.env, 
-                                               aim_input_type = self.cfg.aim_kwargs.aim_input_type, 
-                                               savedir_w_name = self.train_video_recorder.save_dir + '/aim_meta_nml_prob_visualize_train_episode_'+str(episode)+'_s'+str(k),
-                                               )
+                self.visualize_training(episode, recent_sampled_goals, agent, obs)
 
 
                 episode_reward = 0
@@ -699,113 +634,24 @@ class Workspace(object):
 
             agent = self.get_agent()
             replay_buffer = self.get_buffer()
-            # evaluate agent periodically
+            # evaluate agent periodically and visualize
             if self.step % self.cfg.eval_frequency == 0:
                 print('eval started...')
                 self.logger.log('eval/episode', episode - 1, self.step)
                 self.evaluate(eval_uniform_goal=False)                
 
                 if self.step > self.cfg.num_random_steps:
-                    temp_obs, _, _, _, _, _ = self.aim_expl_buffer.sample_without_relabeling(128, agent.discount, sample_only_state = False)
-                    temp_obs = temp_obs.detach().cpu().numpy()
-                    temp_obs_dict = self.env.convert_obs_to_dict(temp_obs)
-                     
-                    temp_dg = temp_obs_dict['desired_goal']
-                    
-                    fig = plt.figure()
-                    sns.set_style("darkgrid")
-                    
-                    ax1 = fig.add_subplot(1,1,1)                                    
-                    ax1.scatter(temp_dg[:, 0], temp_dg[:, 1], label = 'goals')
-                              
-                    if self.cfg.env in ['AntMazeSmall-v0', "PointUMaze-v0"]:
-                        x_min, x_max = -2, 10
-                        y_min, y_max = -2, 10
-                    elif self.cfg.env == "PointSpiralMaze-v0":
-                        x_min, x_max = -10, 10
-                        y_min, y_max = -10, 10
-                    elif self.cfg.env in ["PointNMaze-v0"]:
-                        x_min, x_max = -2, 10
-                        y_min, y_max = -2, 18
-                    elif self.cfg.env in [     'sawyer_peg_push','sawyer_peg_pick_and_place']:
-                        x_min, x_max = -0.6, 0.6
-                        y_min, y_max = 0.2, 1.0
-                    else:
-                        raise NotImplementedError
-
-                    plt.xlim(x_min,x_max)    
-                    plt.ylim(y_min,y_max)
-                    
-                                  
-
-                    ax1.legend(loc ="best") # 'upper right' # , prop={'size': 20}          
-                    plt.savefig(self.eval_video_recorder.save_dir+'/curriculum_goals_'+str(self.step)+'.jpg')
-                    plt.close()
+                    self.visualize_curriculum_goals(agent)
                 
                 if self.cfg.use_residual_randomwalk and (self.randomwalk_buffer.idx > 128 or self.randomwalk_buffer.full):
-                    temp_obs, _, _, _, _, _ = self.randomwalk_buffer.sample_without_relabeling(128, agent.discount, sample_only_state = False)
-                    temp_obs = temp_obs.detach().cpu().numpy()
-                    temp_obs_dict = self.env.convert_obs_to_dict(temp_obs)
-                     
-                    temp_dg = temp_obs_dict['desired_goal']
-                    temp_ag = temp_obs_dict['achieved_goal']
-                    
-                    fig = plt.figure()
-                    sns.set_style("darkgrid")
-                    
-                    ax1 = fig.add_subplot(1,1,1)                                    
-                    ax1.scatter(temp_dg[:, 0], temp_dg[:, 1], label = 'goals')
-                    ax1.scatter(temp_ag[:, 0], temp_ag[:, 1], label = 'achieved states', color = 'red')
-                              
-                    if self.cfg.env in ['AntMazeSmall-v0', "PointUMaze-v0"]:
-                        x_min, x_max = -2, 10
-                        y_min, y_max = -2, 10
-                    elif self.cfg.env == "PointSpiralMaze-v0":
-                        x_min, x_max = -10, 10
-                        y_min, y_max = -10, 10
-                    elif self.cfg.env in ["PointNMaze-v0"]:
-                        x_min, x_max = -2, 10
-                        y_min, y_max = -2, 18
-                    elif self.cfg.env in [     'sawyer_peg_push','sawyer_peg_pick_and_place']:
-                        x_min, x_max = -0.6, 0.6
-                        y_min, y_max = 0.2, 1.0
-                    else:
-                        raise NotImplementedError
-                    plt.xlim(x_min,x_max)    
-                    plt.ylim(y_min,y_max)
-                    
+                    self.visualize_residual_walk_and_goals(agent)
                     
 
-                    ax1.legend(loc ="best") # 'upper right' # , prop={'size': 20}          
-                    plt.savefig(self.eval_video_recorder.save_dir+'/randomwalk_goalandstates_'+str(self.step)+'.jpg')
-                    plt.close()
-                    
 
-            # save agent periodically
-            if self.cfg.save_model and self.step % self.cfg.save_frequency == 0:
-                utils.save(
-                    self.expl_agent,
-                    os.path.join(self.model_dir, f'expl_agent_{self.step}.pt'))                
-            if self.cfg.save_buffer and (self.step % self.cfg.buffer_save_frequency == 0) :
-                utils.save(self.expl_buffer.replay_buffer, os.path.join(self.buffer_dir, f'buffer_{self.step}.pt'))
-                utils.save(self.aim_expl_buffer.replay_buffer, os.path.join(self.buffer_dir, f'aim_disc_buffer_{self.step}.pt'))
-                if self.cfg.use_residual_randomwalk:
-                    utils.save(self.randomwalk_buffer.replay_buffer, os.path.join(self.buffer_dir, f'randomwalk_buffer_{self.step}.pt'))
-            
-                if self.cfg.use_hgg:
-                    utils.save(self.hgg_achieved_trajectory_pool,  os.path.join(self.buffer_dir, f'hgg_achieved_trajectory_pool_{self.step}.pt'))
-                
+            self.periodic_save()  
 
-            # sample action for data collection
-            if self.step < self.cfg.num_random_steps or (self.cfg.randomwalk_method == 'rand_action' and self.env.is_residual_goal):
-                spec = self.env.action_spec()                
-                action = np.random.uniform(spec.low, spec.high,
-                                        spec.shape)
-                
-            else: 
-                with utils.eval_mode(agent):
-                    action = agent.act(obs, spec = self.env.action_spec(), sample=True)
-            
+            action = self.get_agent_act(obs)
+
             logging_dict = agent.update(replay_buffer, self.randomwalk_buffer, self.aim_expl_buffer, self.step, self.env, self.goal_buffer)
             
             if self.step % self.cfg.logging_frequency== 0:                
@@ -826,7 +672,7 @@ class Workspace(object):
             self.train_video_recorder.record(self.env)
 
 
-
+            
             if self.cfg.use_residual_randomwalk:
                 if self.env.is_residual_goal:
                     self.randomwalk_buffer.add(obs, action, reward, next_obs, info.get('is_current_goal_success'), last_timestep)
@@ -840,53 +686,7 @@ class Workspace(object):
 
                 
             if last_timestep:
-                replay_buffer.add_trajectory(episode_observes)
-                replay_buffer.store_episode()
-                self.aim_expl_buffer.store_episode()
-                if self.randomwalk_buffer is not None:
-                    self.randomwalk_buffer.store_episode()
-                if self.randomwalk_buffer is not None:
-                    if (not replay_buffer.full) and (not self.randomwalk_buffer.full):
-                        assert self.step+1 == self.randomwalk_buffer.idx + replay_buffer.idx
-                else:
-                    if not replay_buffer.full:
-                        assert self.step+1 == replay_buffer.idx
-
-                if self.cfg.use_hgg:                    
-                    temp_episode_observes = copy.deepcopy(episode_observes)
-                    temp_episode_ag = []                                        
-                     # NOTE : should it be [obs, ag] ?
-                    if 'aim_f' in self.hgg_sampler.cost_type or 'meta_nml' in self.hgg_sampler.cost_type:
-                        temp_episode_init = self.eval_env.convert_obs_to_dict(temp_episode_observes[0])['achieved_goal'] # for bias computing
-                    else:    
-                        raise NotImplementedError
-                        
-
-                    for k in range(len(temp_episode_observes)):
-                        temp_episode_ag.append(self.eval_env.convert_obs_to_dict(temp_episode_observes[k])['achieved_goal'])
-                    
-                    if getattr(self.env, 'full_state_goal', False):
-                        raise NotImplementedError("You should modify the code when full_state_goal (should address achieved_goal to compute goal distance below)")
-
-
-                    achieved_trajectories = [np.array(temp_episode_ag)] # list of [ts, dim]
-                    achieved_init_states = [temp_episode_init] # list of [ts(1), dim]
-
-                    selection_trajectory_idx = {}
-                    for i in range(len(achieved_trajectories)):                                                 
-                        # full state achieved_goal
-                        if self.cfg.env in ['AntMazeSmall-v0', "PointUMaze-v0", "PointSpiralMaze-v0", "PointNMaze-v0"]:
-                            threshold = 0.2
-                        elif self.cfg.env in [     'sawyer_peg_push','sawyer_peg_pick_and_place']:
-                            threshold = 0.02
-                        else:
-                            raise NotImplementedError
-                        if goal_distance(achieved_trajectories[i][0], achieved_trajectories[i][-1])>threshold: # if there is a difference btw first and last timestep ?
-                            selection_trajectory_idx[i] = True
-                    
-                    hgg_achieved_trajectory_pool = self.hgg_achieved_trajectory_pool
-                    for idx in selection_trajectory_idx.keys():
-                        hgg_achieved_trajectory_pool.insert(achieved_trajectories[idx].copy(), achieved_init_states[idx].copy())
+                self.last_timestep_save(episode_observes, replay_buffer)
                     
                     
                     
@@ -899,20 +699,9 @@ class Workspace(object):
                 if self.env.is_residual_goal:
                     if (self.env.residual_goalstep % 10 == 0) or info.get('is_current_goal_success'):
                         if (self.cfg.use_uncertainty_for_randomwalk not in [None, 'none', 'None']) and self.step > self.get_agent().meta_test_sample_size:
-                            residual_goal = self.get_agent().sample_randomwalk_goals(obs = obs, ag = self.env.convert_obs_to_dict(obs)['achieved_goal'], \
-                                episode = episode, env=self.env, replay_buffer = self.get_inv_weight_curriculum_buffer(), \
-                                num_candidate = self.cfg.randomwalk_num_candidate, random_noise = self.cfg.randomwalk_random_noise, \
-                                uncertainty_mode = self.cfg.use_uncertainty_for_randomwalk)
+                            residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
                         else:
-                            noise = np.random.uniform(low=-self.cfg.randomwalk_random_noise, high=self.cfg.randomwalk_random_noise, size=self.env.goal_dim)
-                            
-                            if self.cfg.env in [   'sawyer_peg_pick_and_place']:
-                                assert self.cfg.randomwalk_random_noise <= 0.2
-                                pass
-                            elif self.cfg.env in [  'sawyer_peg_push']:
-                                assert self.cfg.randomwalk_random_noise <= 0.2
-                                noise[2] = 0
-                            residual_goal = self.env.convert_obs_to_dict(obs)['achieved_goal'] + noise
+                            residual_goal = self.get_residual_goal_with_NML(obs)
                             
                         self.env.reset_goal(residual_goal)
                         obs[-self.env.goal_dim:] = residual_goal.copy()
@@ -920,25 +709,276 @@ class Workspace(object):
                     if info.get('is_current_goal_success'): #succeed original goal
                         self.env.original_goal_success = True
                         if (self.cfg.use_uncertainty_for_randomwalk not in [None, 'none', 'None']) and self.step > self.get_agent().meta_test_sample_size:
-                            residual_goal = self.get_agent().sample_randomwalk_goals(obs = obs, ag = self.env.convert_obs_to_dict(obs)['achieved_goal'], \
-                                episode = episode, env=self.env, replay_buffer = self.get_inv_weight_curriculum_buffer(), \
-                                num_candidate = self.cfg.randomwalk_num_candidate, random_noise = self.cfg.randomwalk_random_noise, \
-                                uncertainty_mode = self.cfg.use_uncertainty_for_randomwalk)
+                            residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
                         else:
-                            noise = np.random.uniform(low=-self.cfg.randomwalk_random_noise, high=self.cfg.randomwalk_random_noise, size=self.env.goal_dim)
+                            residual_goal = self.get_residual_goal_with_NML(obs)
 
-                            if self.cfg.env in [   'sawyer_peg_pick_and_place']:
-                                assert self.cfg.randomwalk_random_noise <= 0.2
-                                pass
-                            elif self.cfg.env in [  'sawyer_peg_push']:
-                                assert self.cfg.randomwalk_random_noise <= 0.2
-                                noise[2] = 0
-                            residual_goal = self.env.convert_obs_to_dict(obs)['achieved_goal'] + noise
                         self.env.reset_goal(residual_goal)
                         obs[-self.env.goal_dim:] = residual_goal.copy()
                 if (episode_step) % self.max_episode_timesteps == 0: #done only horizon ends
                     done = True
                     info['is_success'] = self.env.original_goal_success
+
+    def get_residual_goal_with_NML(self, obs):
+        noise = np.random.uniform(low=-self.cfg.randomwalk_random_noise, high=self.cfg.randomwalk_random_noise, size=self.env.goal_dim)
+                            
+        if self.cfg.env in [   'sawyer_peg_pick_and_place']:
+            assert self.cfg.randomwalk_random_noise <= 0.2
+            pass
+        elif self.cfg.env in [  'sawyer_peg_push']:
+            assert self.cfg.randomwalk_random_noise <= 0.2
+            noise[2] = 0
+        residual_goal = self.env.convert_obs_to_dict(obs)['achieved_goal'] + noise
+        return residual_goal
+
+    def get_residual_goal_with_nonNML(self, episode, obs):
+        return self.get_agent().sample_randomwalk_goals(obs = obs, ag = self.env.convert_obs_to_dict(obs)['achieved_goal'], \
+                                episode = episode, env=self.env, replay_buffer = self.get_inv_weight_curriculum_buffer(), \
+                                num_candidate = self.cfg.randomwalk_num_candidate, random_noise = self.cfg.randomwalk_random_noise, \
+                                uncertainty_mode = self.cfg.use_uncertainty_for_randomwalk)
+
+    def last_timestep_save(self, episode_observes, replay_buffer):
+        replay_buffer.add_trajectory(episode_observes)
+        replay_buffer.store_episode()
+        self.aim_expl_buffer.store_episode()
+        if self.randomwalk_buffer is not None:
+            self.randomwalk_buffer.store_episode()
+        if self.randomwalk_buffer is not None:
+            if (not replay_buffer.full) and (not self.randomwalk_buffer.full):
+                assert self.step+1 == self.randomwalk_buffer.idx + replay_buffer.idx
+        else:
+            if not replay_buffer.full:
+                assert self.step+1 == replay_buffer.idx
+
+        if self.cfg.use_hgg:                    
+            temp_episode_observes = copy.deepcopy(episode_observes)
+            temp_episode_ag = []                                        
+                     # NOTE : should it be [obs, ag] ?
+            if 'aim_f' in self.hgg_sampler.cost_type or 'meta_nml' in self.hgg_sampler.cost_type:
+                temp_episode_init = self.eval_env.convert_obs_to_dict(temp_episode_observes[0])['achieved_goal'] # for bias computing
+            else:    
+                raise NotImplementedError
+                        
+
+            for k in range(len(temp_episode_observes)):
+                temp_episode_ag.append(self.eval_env.convert_obs_to_dict(temp_episode_observes[k])['achieved_goal'])
+                    
+            if getattr(self.env, 'full_state_goal', False):
+                raise NotImplementedError("You should modify the code when full_state_goal (should address achieved_goal to compute goal distance below)")
+
+
+            achieved_trajectories = [np.array(temp_episode_ag)] # list of [ts, dim]
+            achieved_init_states = [temp_episode_init] # list of [ts(1), dim]
+
+            selection_trajectory_idx = {}
+            for i in range(len(achieved_trajectories)):                                                 
+                        # full state achieved_goal
+                if self.cfg.env in ['AntMazeSmall-v0', "PointUMaze-v0", "PointSpiralMaze-v0", "PointNMaze-v0"]:
+                    threshold = 0.2
+                elif self.cfg.env in [     'sawyer_peg_push','sawyer_peg_pick_and_place']:
+                    threshold = 0.02
+                else:
+                    raise NotImplementedError
+                if goal_distance(achieved_trajectories[i][0], achieved_trajectories[i][-1])>threshold: # if there is a difference btw first and last timestep ?
+                    selection_trajectory_idx[i] = True
+                    
+            hgg_achieved_trajectory_pool = self.hgg_achieved_trajectory_pool
+            for idx in selection_trajectory_idx.keys():
+                hgg_achieved_trajectory_pool.insert(achieved_trajectories[idx].copy(), achieved_init_states[idx].copy())
+    def get_agent_act(self,obs):
+            agent = self.get_agent()
+            # sample action for data collection
+            if self.step < self.cfg.num_random_steps or (self.cfg.randomwalk_method == 'rand_action' and self.env.is_residual_goal):
+                spec = self.env.action_spec()                
+                action = np.random.uniform(spec.low, spec.high,
+                                        spec.shape)
+                
+            else: 
+                with utils.eval_mode(agent):
+                    action = agent.act(obs, spec = self.env.action_spec(), sample=True)
+            return action
+    def periodic_save(self):
+        if self.cfg.save_model and self.step % self.cfg.save_frequency == 0:
+            utils.save(
+                self.expl_agent,
+                os.path.join(self.model_dir, f'expl_agent_{self.step}.pt'))                
+        if self.cfg.save_buffer and (self.step % self.cfg.buffer_save_frequency == 0) :
+            utils.save(self.expl_buffer.replay_buffer, os.path.join(self.buffer_dir, f'buffer_{self.step}.pt'))
+            utils.save(self.aim_expl_buffer.replay_buffer, os.path.join(self.buffer_dir, f'aim_disc_buffer_{self.step}.pt'))
+            if self.cfg.use_residual_randomwalk:
+                utils.save(self.randomwalk_buffer.replay_buffer, os.path.join(self.buffer_dir, f'randomwalk_buffer_{self.step}.pt'))
+        
+            if self.cfg.use_hgg:
+                utils.save(self.hgg_achieved_trajectory_pool,  os.path.join(self.buffer_dir, f'hgg_achieved_trajectory_pool_{self.step}.pt'))
+
+    def visualize_residual_walk_and_goals(self, agent):
+        temp_obs, _, _, _, _, _ = self.randomwalk_buffer.sample_without_relabeling(128, agent.discount, sample_only_state = False)
+        temp_obs = temp_obs.detach().cpu().numpy()
+        temp_obs_dict = self.env.convert_obs_to_dict(temp_obs)
+                     
+        temp_dg = temp_obs_dict['desired_goal']
+        temp_ag = temp_obs_dict['achieved_goal']
+                    
+        fig = plt.figure()
+        sns.set_style("darkgrid")
+                    
+        ax1 = fig.add_subplot(1,1,1)                                    
+        ax1.scatter(temp_dg[:, 0], temp_dg[:, 1], label = 'goals')
+        ax1.scatter(temp_ag[:, 0], temp_ag[:, 1], label = 'achieved states', color = 'red')
+                              
+        if self.cfg.env in ['AntMazeSmall-v0', "PointUMaze-v0"]:
+            x_min, x_max = -2, 10
+            y_min, y_max = -2, 10
+        elif self.cfg.env == "PointSpiralMaze-v0":
+            x_min, x_max = -10, 10
+            y_min, y_max = -10, 10
+        elif self.cfg.env in ["PointNMaze-v0"]:
+            x_min, x_max = -2, 10
+            y_min, y_max = -2, 18
+        elif self.cfg.env in [     'sawyer_peg_push','sawyer_peg_pick_and_place']:
+            x_min, x_max = -0.6, 0.6
+            y_min, y_max = 0.2, 1.0
+        else:
+            raise NotImplementedError
+        plt.xlim(x_min,x_max)    
+        plt.ylim(y_min,y_max)
+                    
+                    
+
+        ax1.legend(loc ="best") # 'upper right' # , prop={'size': 20}          
+        plt.savefig(self.eval_video_recorder.save_dir+'/randomwalk_goalandstates_'+str(self.step)+'.jpg')
+        plt.close()
+
+    def visualize_curriculum_goals(self, agent):
+        temp_obs, _, _, _, _, _ = self.aim_expl_buffer.sample_without_relabeling(128, agent.discount, sample_only_state = False)
+        temp_obs = temp_obs.detach().cpu().numpy()
+        temp_obs_dict = self.env.convert_obs_to_dict(temp_obs)
+                     
+        temp_dg = temp_obs_dict['desired_goal']
+                    
+        fig = plt.figure()
+        sns.set_style("darkgrid")
+                    
+        ax1 = fig.add_subplot(1,1,1)                                    
+        ax1.scatter(temp_dg[:, 0], temp_dg[:, 1], label = 'goals')
+                              
+        if self.cfg.env in ['AntMazeSmall-v0', "PointUMaze-v0"]:
+            x_min, x_max = -2, 10
+            y_min, y_max = -2, 10
+        elif self.cfg.env == "PointSpiralMaze-v0":
+            x_min, x_max = -10, 10
+            y_min, y_max = -10, 10
+        elif self.cfg.env in ["PointNMaze-v0"]:
+            x_min, x_max = -2, 10
+            y_min, y_max = -2, 18
+        elif self.cfg.env in [     'sawyer_peg_push','sawyer_peg_pick_and_place']:
+            x_min, x_max = -0.6, 0.6
+            y_min, y_max = 0.2, 1.0
+        else:
+            raise NotImplementedError
+
+        plt.xlim(x_min,x_max)    
+        plt.ylim(y_min,y_max)
+                    
+                                  
+
+        ax1.legend(loc ="best") # 'upper right' # , prop={'size': 20}          
+        plt.savefig(self.eval_video_recorder.save_dir+'/curriculum_goals_'+str(self.step)+'.jpg')
+        plt.close()
+
+    def visualize_training(self, episode, recent_sampled_goals, agent, obs):
+        self.train_video_recorder.init(enabled=False)
+                
+        hgg_save_freq = 3 if 'Point' in self.cfg.env else 25
+        if self.cfg.use_hgg and episode % hgg_save_freq == 0 :
+            sampled_goals_for_vis = np.array(recent_sampled_goals.queue) 
+            fig = plt.figure()
+            sns.set_style("darkgrid")
+            ax1 = fig.add_subplot(1,1,1)                    
+            ax1.scatter(sampled_goals_for_vis[:, 0], sampled_goals_for_vis[:, 1])
+            if self.cfg.env in ['AntMazeSmall-v0', "PointUMaze-v0"]:
+                plt.xlim(-2,10)    
+                plt.ylim(-2,10)
+            elif self.cfg.env == "PointSpiralMaze-v0":
+                plt.xlim(-10,10)    
+                plt.ylim(-10,10)
+            elif self.cfg.env in ["PointNMaze-v0"]:
+                plt.xlim(-2,10)    
+                plt.ylim(-2,18)
+            elif self.cfg.env in [     'sawyer_peg_push','sawyer_peg_pick_and_place']:
+                plt.xlim(-0.6,0.6)    
+                plt.ylim(0.2,1.0)
+            else:
+                raise NotImplementedError
+            plt.savefig(self.train_video_recorder.save_dir+'/train_hgg_goals_episode_'+str(episode)+'.jpg')
+            plt.close()
+            with open(self.train_video_recorder.save_dir+'/train_hgg_goals_episode_'+str(episode)+'.pkl', 'wb') as f:
+                pkl.dump(sampled_goals_for_vis, f)
+
+
+        if episode % self.cfg.train_episode_video_freq == 0 or episode in [25,50,75,100]:             
+            self.train_video_recorder.init(enabled=False)           
+                    # Visualize from init state to subgoals
+                   
+
+            visualize_num_iter = 0
+            scatter_states = self.env.convert_obs_to_dict(obs.copy())['achieved_goal'][None, :]
+                    
+            for k in range(visualize_num_iter+1):                                                
+                init_state = scatter_states[k]
+                if self.cfg.use_aim:
+                    visualize_discriminator(normalizer = agent.normalize_obs if self.cfg.normalize_f_obs else None,
+                                                    discriminator = agent.aim_discriminator, 
+                                                    initial_state = init_state, 
+                                                    scatter_states = scatter_states.squeeze(),
+                                                    env_name = self.cfg.env, 
+                                                    aim_input_type = self.cfg.aim_kwargs.aim_input_type,
+                                                    device = self.device, 
+                                                    savedir_w_name = self.train_video_recorder.save_dir + '/aim_f_visualize_train_episode_'+str(episode)+'_s'+str(k),
+                                                    )
+
+                    visualize_discriminator2(normalizer = agent.normalize_obs if self.cfg.normalize_f_obs else None,
+                                                    discriminator = agent.aim_discriminator, 
+                                                    env_name = self.cfg.env, 
+                                                    aim_input_type = self.cfg.aim_kwargs.aim_input_type,
+                                                    device = self.device, 
+                                                    savedir_w_name = self.train_video_recorder.save_dir + '/aim_f_visualize_train_goalfix_'+str(episode)+'_s'+str(k),
+                                                    )
+                if self.cfg.use_meta_nml:
+                    visualize_meta_nml(agent=agent, 
+                                               meta_nml_epoch=episode, 
+                                               scatter_states = scatter_states.squeeze(),
+                                               replay_buffer= self.get_buffer(), 
+                                               goal_env = self.env,
+                                               env_name = self.cfg.env, 
+                                               aim_input_type = self.cfg.aim_kwargs.aim_input_type, 
+                                               savedir_w_name = self.train_video_recorder.save_dir + '/aim_meta_nml_prob_visualize_train_episode_'+str(episode)+'_s'+str(k),
+                                               )
+
+    def hgg_sample(self, recent_sampled_goals):
+        obs = None
+        if self.cfg.use_hgg:                    
+            hgg_sampler = self.hgg_sampler
+            n_iter = 0
+            while True:
+                        # print('hgg sampler pool len : {} step : {}'.format(len(hgg_sampler.pool), self.step))
+                sampled_goal = hgg_sampler.sample(np.random.randint(len(hgg_sampler.pool))).copy()                        
+                obs = self.env.reset(goal = sampled_goal)
+
+                if not self.env.is_successful(obs):
+                    break
+                n_iter +=1
+                if n_iter==10:
+                    break
+
+            if recent_sampled_goals.full():
+                recent_sampled_goals.get()
+            recent_sampled_goals.put(sampled_goal)
+                    # obs = self.env.reset(goal = sampled_goal)
+            assert (sampled_goal == self.env.goal.copy()).all()
+        else:
+            obs = self.env.reset()
+        return obs
 
     def run_init(self):
         episode, episode_reward, episode_step = 0, 0, 0
