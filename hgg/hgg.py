@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 import time
 
+
 def goal_distance(goal_a, goal_b):
 	return np.linalg.norm(goal_a - goal_b, ord=2)
 def goal_concat(obs, goal):
@@ -192,7 +193,7 @@ class MatchSampler:
 		achieved_pool_traj_lengths = [traj.shape[0] for traj in achieved_pool] # list of ts			
 		reshaped_achieved_pool = np.concatenate([traj for traj in achieved_pool], axis =0) # [ts_1+ts_2+ ... , dim]
 		start = time.time()
-		reshaped_classification_probs = self.agent.get_prob_by_meta_nml(reshaped_achieved_pool, meta_nml_epoch, replay_buffer=replay_buffer, goal_env=self.eval_env)			
+		reshaped_classification_probs = self.agent.get_prob_by_meta_nml(reshaped_achieved_pool, meta_nml_epoch, replay_buffer=replay_buffer, goal_env=self.eval_env)	# 0, 0.5 , 1		
 		# print('meta evaluation time in hgg update : ', time.time() - start)
 		classification_probs = []			
 		for idx, length in enumerate(achieved_pool_traj_lengths):
@@ -216,80 +217,25 @@ class MatchSampler:
 		# for meta nml computational efficiency, jump 5% of max timesteps
 		## there is no process done by meta-nml here to replace with decision transformer
 		if 'meta_nml' in self.cost_type: # shortens every tracjectory inside achieved_pool 
-			self.meta_nml_shorten_trajectory(achieved_pool=achieved_pool)
+			achieved_pool = self.meta_nml_shorten_trajectory(achieved_pool=achieved_pool)
 
 		assert len(achieved_pool)>=self.length, 'If not, errors at assert match_count==self.length, e.g. len(achieved_pool)=5, self.length=25, match_count=5'
 		if 'aim_f' in self.cost_type: 
 			assert self.agent.aim_discriminator is not None
 
 
-		candidate_goals = []
-		candidate_edges = []
-		candidate_id = []
 		achieved_value = self.generate_achieved_value(achieved_pool_init_state,achieved_pool)
 		self.normalize_achieved_value(achieved_value)
 
 		if 'meta_nml' in self.cost_type:
-			classification_probs =self.meta_nml_generate_reshaped_classification_probs(meta_nml_epoch=meta_nml_epoch,replay_buffer=replay_buffer)
+			classification_probs =self.meta_nml_generate_reshaped_classification_probs(meta_nml_epoch=meta_nml_epoch,achieved_pool=achieved_pool,replay_buffer=replay_buffer)
 
 		self.generate_goals(achieved_pool,desired_goals,classification_probs,achieved_value)
-		# n = 0
-		# graph_id = {'achieved':[],'desired':[]}
-		# for i in range(len(achieved_pool)):
-		# 	n += 1
-		# 	graph_id['achieved'].append(n)
-		# for i in range(len(desired_goals)):
-		# 	n += 1
-		# 	graph_id['desired'].append(n)
-		# n += 1
-		# self.match_lib.clear(n)
-  
-
-
-		# for i in range(len(achieved_pool)):
-		# 	self.match_lib.add(0, graph_id['achieved'][i], 1, 0)
 		
-		
-		# for i in range(len(achieved_pool)):
-		# 	# meta_nml uncertainty distance metric, aim_f bias				
-		# 	# cross entropy (when the probability becomes 1 (goal example), the loss is minimized)			
-		# 	if (self.agent.aim_discriminator is not None) and ('aim_f' in self.cost_type) and ('meta_nml' in self.cost_type):
-		# 		labels = torch.ones_like(classification_probs[i]).to(self.device)
-		# 		cross_entropy_loss = self.loss_function(classification_probs[i], labels).detach().cpu().numpy()				
-		# 		res = cross_entropy_loss - achieved_value[i]/(self.hgg_L/self.max_dis/(1-self.gamma))
-		# 	elif (self.agent.aim_discriminator is not None) and ('aim_f' in self.cost_type):
-		# 		res = - achieved_value[i]/(self.hgg_L/self.max_dis/(1-self.gamma))
-		# 	elif ('meta_nml' in self.cost_type):
-		# 		labels = torch.ones_like(classification_probs[i]).to(self.device)
-		# 		cross_entropy_loss = self.loss_function(classification_probs[i], labels).detach().cpu().numpy()
-		# 		res = cross_entropy_loss
-		# 	match_dis = np.min(res)
-
-		# 	for j in range(len(desired_goals)): 
-		# 		if ('aim_f' in self.cost_type) or ('meta_nml' in self.cost_type):
-		# 			pass
-		# 		else: raise NotImplementedError
-
-		# 		match_idx = np.argmin(res)
-
-		# 		edge = self.match_lib.add(graph_id['achieved'][i], graph_id['desired'][j], 1, c_double(match_dis))
-		# 		candidate_goals.append(achieved_pool[i][match_idx])
-		# 		candidate_edges.append(edge)
-		# 		candidate_id.append(j)
-		# for i in range(len(desired_goals)):
-		# 	self.match_lib.add(graph_id['desired'][i], n, 1, 0)
-
-		# match_count = self.match_lib.cost_flow(0,n)
-		# assert match_count==self.length
-
-		# explore_goals = [0]*self.length
-		# for i in range(len(candidate_goals)):
-		# 	if self.match_lib.check_match(candidate_edges[i])==1:
-		# 		explore_goals[candidate_id[i]] = candidate_goals[i].copy()
-		# assert len(explore_goals)==self.length
-		# self.pool = np.array(explore_goals)
 
 	def generate_goals(self,achieved_pool,desired_goals,classification_probs,achieved_value):
+
+		##init
 		candidate_goals = []
 		candidate_edges = []
 		candidate_id = []
@@ -321,7 +267,7 @@ class MatchSampler:
 				res = - achieved_value[i]/(self.hgg_L/self.max_dis/(1-self.gamma))
 			elif ('meta_nml' in self.cost_type):
 				labels = torch.ones_like(classification_probs[i]).to(self.device)
-				cross_entropy_loss = self.loss_function(classification_probs[i], labels).detach().cpu().numpy()
+				cross_entropy_loss = self.loss_function(classification_probs[i], labels).detach().cpu().numpy() # not necessarily a loss function, rather it is a distance calculation
 				res = cross_entropy_loss
 			match_dis = np.min(res)
 

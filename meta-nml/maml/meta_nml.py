@@ -209,7 +209,7 @@ class MetaNML:
         else:
             assert (train_data is not None and test_data is not None), "Must provide train_data and test_data when not in fixed dataset mode"
 
-            if reweight_to_uniform:
+            if reweight_to_uniform: # reorder for some certain purpose, might steal later for decision transformer
                 e_Phi = np.sum(self.evaluate(train_data[0], num_grad_steps=self.num_adaptation_steps, train_data=test_data, normalize=False), axis=1)
                 weights = np.clips((e_Phi - 1) / (2 - e_Phi), 0, None)
                 idxs = np.random.choice(range(len(train_data[0])), len(train_data[0]), replace=True, p=weights / sum(weights))

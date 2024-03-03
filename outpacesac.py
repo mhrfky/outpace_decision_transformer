@@ -389,7 +389,7 @@ class OUTPACEAgent(object):
         return positives.astype(np.float32), np.ones(len(positives))
 
     def sample_meta_test_batch(self, size, replay_buffer=None, goal_env=None):
-        if self.meta_nml_negatives_only:
+        if self.meta_nml_negatives_only: #not used in the current setting
             return self.sample_negatives(replay_buffer, goal_env, size)
         else:
             negatives = self.sample_negatives(replay_buffer, goal_env, size // 2)
@@ -751,10 +751,10 @@ class OUTPACEAgent(object):
                         test_data[0] = self.normalize_obs(test_data[0], self.env_name)
                         train_data = tuple(train_data)
                         test_data = tuple(test_data)
-                    self.meta_nml_results = self.meta_nml.train(train_data, test_data, 
-                                        batch_size=self.meta_task_batch_size, accumulation_steps=self.accumulation_steps,
-                                        num_epochs=num_epochs, test_strategy=self.test_strategy, 
-                                        test_batch_size=self.meta_test_batch_size, mixup_alpha=self.mixup_alpha)
+                    # self.meta_nml_results = self.meta_nml.train(train_data, test_data, 
+                    #                     batch_size=self.meta_task_batch_size, accumulation_steps=self.accumulation_steps,
+                    #                     num_epochs=num_epochs, test_strategy=self.test_strategy, 
+                    #                     test_batch_size=self.meta_test_batch_size, mixup_alpha=self.mixup_alpha)
                     self.meta_train_time = (time.time() - meta_train_start)
                 
 
@@ -777,19 +777,19 @@ class OUTPACEAgent(object):
                         test_data[0] = self.normalize_obs(test_data[0], self.env_name)
                         train_data = tuple(train_data)
                         test_data = tuple(test_data)
-                    self.meta_nml_results = self.meta_nml.train(train_data, test_data, 
-                                        batch_size=self.meta_task_batch_size, accumulation_steps=self.accumulation_steps,
-                                        num_epochs=num_epochs, test_strategy=self.test_strategy, 
-                                        test_batch_size=self.meta_test_batch_size, mixup_alpha=self.mixup_alpha)
+                    # self.meta_nml_results = self.meta_nml.train(train_data, test_data, 
+                    #                     batch_size=self.meta_task_batch_size, accumulation_steps=self.accumulation_steps,
+                    #                     num_epochs=num_epochs, test_strategy=self.test_strategy, 
+                    #                     test_batch_size=self.meta_test_batch_size, mixup_alpha=self.mixup_alpha)
                     self.meta_train_time = (time.time() - meta_train_start)
           
 
-        # if len(replay_buffer) < self.num_seed_steps:
+        # the same as above in terms of functionality
         if step < self.num_seed_steps:
             return
         if self.use_aim:
             if step % self.aim_disc_update_frequency == 0 :
-                # assume goal concatenated obs
+                # assume goal concatenated to obs
                 drewards = []
                 for disc_step in range(self.aim_discriminator_steps):
                     _, rsamples = self.update_aim_discriminator(aim_disc_replay_buffer, goal_env)                
@@ -815,10 +815,10 @@ class OUTPACEAgent(object):
                     test_data[0] = self.normalize_obs(test_data[0], self.env_name)
                     train_data = tuple(train_data)
                     test_data = tuple(test_data)
-                self.meta_nml_results = self.meta_nml.train(train_data, test_data, 
-                                    batch_size=self.meta_task_batch_size, accumulation_steps=self.accumulation_steps,
-                                    num_epochs=num_epochs, test_strategy=self.test_strategy, 
-                                    test_batch_size=self.meta_test_batch_size, mixup_alpha=self.mixup_alpha)
+                # self.meta_nml_results = self.meta_nml.train(train_data, test_data, 
+                #                     batch_size=self.meta_task_batch_size, accumulation_steps=self.accumulation_steps,
+                #                     num_epochs=num_epochs, test_strategy=self.test_strategy, 
+                #                     test_batch_size=self.meta_test_batch_size, mixup_alpha=self.mixup_alpha)
                 self.meta_train_time = (time.time() - meta_train_start)
 
         else:            
@@ -838,10 +838,10 @@ class OUTPACEAgent(object):
                     test_data[0] = self.normalize_obs(test_data[0], self.env_name)
                     train_data = tuple(train_data)
                     test_data = tuple(test_data)
-                self.meta_nml_results = self.meta_nml.train(train_data, test_data, 
-                                    batch_size=self.meta_task_batch_size, accumulation_steps=self.accumulation_steps,
-                                    num_epochs=num_epochs, test_strategy=self.test_strategy, 
-                                    test_batch_size=self.meta_test_batch_size, mixup_alpha=self.mixup_alpha)
+                # self.meta_nml_results = self.meta_nml.train(train_data, test_data, 
+                #                     batch_size=self.meta_task_batch_size, accumulation_steps=self.accumulation_steps,
+                #                     num_epochs=num_epochs, test_strategy=self.test_strategy, 
+                #                     test_batch_size=self.meta_test_batch_size, mixup_alpha=self.mixup_alpha)
                 self.meta_train_time = (time.time() - meta_train_start)
             
 
@@ -853,7 +853,7 @@ class OUTPACEAgent(object):
         
 
 
-        ###############
+        ############### not meta-nml related, still would be good to understand
         if self.use_aim:
             with torch.no_grad():                
                 obs_dict, next_obs_dict = map(goal_env.convert_obs_to_dict, (obs, next_obs))                
@@ -906,7 +906,7 @@ class OUTPACEAgent(object):
         
         
         
-        # From here, RL related 
+        # From here, RL related hence no need to touch #############################################################
         if self.normalize_rl_obs:
             obs = self.normalize_obs(obs, self.env_name)
             next_obs = self.normalize_obs(next_obs, self.env_name)
@@ -920,7 +920,7 @@ class OUTPACEAgent(object):
         
 
         if step % self.actor_update_frequency == 0:
-            self.actor_loss, self.alpha_loss, self.actor_log_prob = self.update_actor_and_alpha(obs, step, offline_rl_dict=offline_rl_dict)
+            self.actor_loss, self.alpha_loss, self.actor_log_prob = self.update_actor_and_alpha(obs, step, offline_rl_dict=offline_rl_dict) # no need to touch
             
         if step % self.critic_target_update_frequency == 0:            
             utils.soft_update_params(self.critic, self.critic_target,
@@ -954,12 +954,12 @@ class OUTPACEAgent(object):
             logging_dict.update({'aim_graph_penalty_loss' : self.graph_penalty.detach().cpu().numpy()}) # it should be near zero to satisfy lipschitz constraint?
 
 
-        if self.use_meta_nml: # list of dictionary
-            logging_dict.update({'meta_nml_time' : self.meta_train_time})            
-            all_keys = self.meta_nml_results[0].keys()
-            for key in all_keys:                
-                val = np.stack([res[key] for res in self.meta_nml_results], axis =0).mean()            
-                logging_dict.update({'meta_nml_'+str(key) : val})
+        # if self.use_meta_nml: # list of dictionary
+        #     logging_dict.update({'meta_nml_time' : self.meta_train_time})            
+        #     all_keys = self.meta_nml_results[0].keys()
+        #     for key in all_keys:                
+        #         val = np.stack([res[key] for res in self.meta_nml_results], axis =0).mean()            
+        #         logging_dict.update({'meta_nml_'+str(key) : val})
 
 
         return logging_dict

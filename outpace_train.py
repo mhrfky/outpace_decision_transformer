@@ -8,7 +8,7 @@ import copy
 import pickle as pkl
 import sys
 import time
-
+from watchpoints import watch
 import numpy as np
 from queue import Queue
 import hydra
@@ -23,6 +23,7 @@ from hgg.hgg import goal_distance
 from visualize.visualize_2d import *
 torch.backends.cudnn.benchmark = True
 
+watch.config(pdb=True)
 class UniformFeasibleGoalSampler:
     def __init__(self, env_name):        
         self.env_name = env_name        
@@ -392,6 +393,7 @@ class Workspace(object):
                                                             env_name = cfg.env,
                                                             consider_done_true = cfg.done_on_success,
                                                             )
+        # watch(self.expl_buffer.episode_transitions)
         self.aim_expl_buffer = HindsightExperienceReplayWrapperVer2(self.aim_expl_buffer, 
                                                             n_sampled_goal=cfg.aim_n_sampled_goal, #n_sampled_goal, 
                                                             # goal_selection_strategy=KEY_TO_GOAL_STRATEGY['future'],
@@ -400,7 +402,7 @@ class Workspace(object):
                                                             consider_done_true = cfg.done_on_success,
                                                             )
 
-    def meta_nml_init(self, cfg):
+    def meta_nml_init(self, cfg): #no worries
         if cfg.use_meta_nml:
             if cfg.meta_nml.num_finetuning_layers in [None, 'none', 'None']:
                 cfg.meta_nml.num_finetuning_layers = None
@@ -602,7 +604,7 @@ class Workspace(object):
 
 
                 self.train_video_recorder.save(f'train_episode_{episode-1}.mp4')                
-                if self.step > 0:
+                if self.step > 0: #about logging
                     fps = episode_step / (time.time() - start_time)
                     self.logger.log('train/fps', fps, self.step)
                     start_time = time.time()
@@ -632,7 +634,6 @@ class Workspace(object):
                 episode_observes = [obs]
                 self.logger.log('train/episode', episode, self.step)
 
-            agent = self.get_agent()
             replay_buffer = self.get_buffer()
             # evaluate agent periodically and visualize
             if self.step % self.cfg.eval_frequency == 0:
@@ -647,11 +648,9 @@ class Workspace(object):
                     self.visualize_residual_walk_and_goals(agent)
                     
 
-
+            
             self.periodic_save()  
-
             action = self.get_agent_act(obs)
-
             logging_dict = agent.update(replay_buffer, self.randomwalk_buffer, self.aim_expl_buffer, self.step, self.env, self.goal_buffer)
             
             if self.step % self.cfg.logging_frequency== 0:                
@@ -661,7 +660,7 @@ class Workspace(object):
             
            
             next_obs, reward, done, info = self.env.step(action)
-            
+            # self.env.render()
             episode_reward += reward
             episode_observes.append(next_obs)
 
@@ -673,16 +672,7 @@ class Workspace(object):
 
 
             
-            if self.cfg.use_residual_randomwalk:
-                if self.env.is_residual_goal:
-                    self.randomwalk_buffer.add(obs, action, reward, next_obs, info.get('is_current_goal_success'), last_timestep)
-                else:
-                    replay_buffer.add(obs, action, reward, next_obs, info.get('is_current_goal_success'), last_timestep)
-                    self.aim_expl_buffer.add(obs, action, reward, next_obs, info.get('is_current_goal_success'), last_timestep)
-
-            else:
-                replay_buffer.add(obs, action, reward, next_obs, done, last_timestep)
-                self.aim_expl_buffer.add(obs, action, reward, next_obs, done, last_timestep)
+            self.buffer_update(done, info, obs, replay_buffer, action, next_obs, reward, last_timestep)
 
                 
             if last_timestep:
@@ -718,6 +708,18 @@ class Workspace(object):
                 if (episode_step) % self.max_episode_timesteps == 0: #done only horizon ends
                     done = True
                     info['is_success'] = self.env.original_goal_success
+
+    def buffer_update(self, done, info, obs, replay_buffer, action, next_obs, reward, last_timestep):
+        if self.cfg.use_residual_randomwalk:
+            if self.env.is_residual_goal:
+                self.randomwalk_buffer.add(obs, action, reward, next_obs, info.get('is_current_goal_success'), last_timestep)
+            else:
+                replay_buffer.add(obs, action, reward, next_obs, info.get('is_current_goal_success'), last_timestep)
+                self.aim_expl_buffer.add(obs, action, reward, next_obs, info.get('is_current_goal_success'), last_timestep)
+
+        else:
+            replay_buffer.add(obs, action, reward, next_obs, done, last_timestep)
+            self.aim_expl_buffer.add(obs, action, reward, next_obs, done, last_timestep)
 
     def get_residual_goal_with_NML(self, obs):
         noise = np.random.uniform(low=-self.cfg.randomwalk_random_noise, high=self.cfg.randomwalk_random_noise, size=self.env.goal_dim)
@@ -855,12 +857,14 @@ class Workspace(object):
         temp_obs_dict = self.env.convert_obs_to_dict(temp_obs)
                      
         temp_dg = temp_obs_dict['desired_goal']
-                    
+        temp_ag = temp_obs_dict['achieved_goal']
+
         fig = plt.figure()
         sns.set_style("darkgrid")
                     
         ax1 = fig.add_subplot(1,1,1)                                    
-        ax1.scatter(temp_dg[:, 0], temp_dg[:, 1], label = 'goals')
+        ax1.scatter(temp_dg[:, 0], temp_dg[:, 1], label = 'desired goals', color = 'red')
+        ax1.scatter(temp_ag[:, 0], temp_ag[:, 1], label = 'achieved goals', color = 'green')
                               
         if self.cfg.env in ['AntMazeSmall-v0', "PointUMaze-v0"]:
             x_min, x_max = -2, 10
@@ -962,7 +966,7 @@ class Workspace(object):
             n_iter = 0
             while True:
                         # print('hgg sampler pool len : {} step : {}'.format(len(hgg_sampler.pool), self.step))
-                sampled_goal = hgg_sampler.sample(np.random.randint(len(hgg_sampler.pool))).copy()                        
+                sampled_goal = hgg_sampler.sample(np.random.randint(len(hgg_sampler.pool))).copy()   # curriculum i cikarir                     
                 obs = self.env.reset(goal = sampled_goal)
 
                 if not self.env.is_successful(obs):
@@ -998,8 +1002,8 @@ class Workspace(object):
         self.meta_nml_run_init()
 
         if self.cfg.use_hgg:
-            temp_obs = self.eval_env.reset()        
-            recent_sampled_goals.put(self.eval_env.convert_obs_to_dict(temp_obs)['achieved_goal'].copy())
+            temp_obs = self.eval_env.reset()        # reset everything, and get the observations of the moment
+            recent_sampled_goals.put(self.eval_env.convert_obs_to_dict(temp_obs)['achieved_goal'].copy()) #add the first observation after reset
 
 
         current_pocket_success = 0

@@ -237,7 +237,7 @@ class ModelAgnosticMetaLearning(object):
         results = {'inner_losses': np.zeros(
             (num_adaptation_steps,), dtype=np.float32)}
 
-        for step in range(num_adaptation_steps):
+        for step in range(num_adaptation_steps): # which is 1 in our case
             logits = self.model(inputs, params=params)
             if targets.shape[-1] == 2 and is_classification_task:
                 # If `test_targets` has 2 columns for a classification task, then the second column 
