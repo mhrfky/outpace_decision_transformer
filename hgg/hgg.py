@@ -231,6 +231,13 @@ class MatchSampler:
 			classification_probs =self.meta_nml_generate_reshaped_classification_probs(meta_nml_epoch=meta_nml_epoch,achieved_pool=achieved_pool,replay_buffer=replay_buffer)
 
 		self.generate_goals(achieved_pool,desired_goals,classification_probs,achieved_value)
+
+	def generate_goals_with_dt(self,achieved_pool,desired_goals,achieved_value,replay_buffer):
+		# 
+		# it seems like no need for seq_trainer
+		# 
+
+		pass
 		
 
 	def generate_goals(self,achieved_pool,desired_goals,classification_probs,achieved_value):

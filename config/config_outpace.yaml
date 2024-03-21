@@ -16,9 +16,9 @@ log_frequency_step: 10000
 log_save_tb: true
 save_video: true
 save_model: false
-save_buffer: false
+save_buffer: true
 save_pixels: false
-save_frequency: 500000
+save_frequency: 50000 # original frequency is 500000
 buffer_save_frequency : ${save_frequency}
 device: "cuda"
 

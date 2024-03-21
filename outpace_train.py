@@ -23,7 +23,6 @@ from hgg.hgg import goal_distance
 from visualize.visualize_2d import *
 torch.backends.cudnn.benchmark = True
 
-watch.config(pdb=True)
 class UniformFeasibleGoalSampler:
     def __init__(self, env_name):        
         self.env_name = env_name        
@@ -677,6 +676,7 @@ class Workspace(object):
                 
             if last_timestep:
                 self.last_timestep_save(episode_observes, replay_buffer)
+                
                     
                     
                     
@@ -787,6 +787,7 @@ class Workspace(object):
             hgg_achieved_trajectory_pool = self.hgg_achieved_trajectory_pool
             for idx in selection_trajectory_idx.keys():
                 hgg_achieved_trajectory_pool.insert(achieved_trajectories[idx].copy(), achieved_init_states[idx].copy())
+                
     def get_agent_act(self,obs):
             agent = self.get_agent()
             # sample action for data collection
