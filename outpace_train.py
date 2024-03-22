@@ -223,6 +223,55 @@ class Workspace(object):
         
         
         self.uniform_goal_sampler =  UniformFeasibleGoalSampler(env_name=cfg.env)
+    def init_dt_sampler(self, obs_spec, action_spec):
+        from hgg.dt_hgg import DTSampler
+        from dt.models.decision_transformer import DecisionTransformer
+        from dt.training.seq_trainer import SequenceStateTrainer
+        state_dim = obs_spec.shape()
+        act_dim = action_spec.shape()
+        max_length = 100
+        max_ep_length = 100
+        embed_dim =  128
+        n_layer = 3
+        n_head = 1
+        activation_func = 'relu'
+        n_positions = 1024
+        resid_pdrop = 0.1
+        attn_pdrop = 0.1
+        learning_rate = 1e-4
+        weight_decay = 1e-4
+        warmup_steps = 10000
+        init_goal = self.eval_env.convert_obs_to_dict(self.eval_env.reset())['achieved_goal'].copy()
+        dt = DecisionTransformer(state_dim = state_dim,
+                                 act_dim = act_dim,
+                                 max_length = max_length,
+                                 max_ep_len = max_ep_length,
+                                 hidden_size= embed_dim,
+                                 n_layer = n_layer,
+                                 n_head = n_head,
+                                 activation_function = activation_func,
+                                 n_positions = n_positions,
+                                 resid_pdrop = resid_pdrop,
+                                 attn_pdrop = attn_pdrop)
+        optimizer = torch.optim.AdamW(
+            dt.parameters(),
+            lr=learning_rate,
+            weight_decay=weight_decay
+        )
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer,
+            lambda steps: min((steps+1)/warmup_steps, 1)
+        )
+        
+
+        
+        self.dt_sampler = DTSampler(dt = dt,
+                                    achieved_trajectory_pool=self.hgg_achieved_trajectory_pool,
+                                    num_episodes=0,#TODO
+                                    add_noise_to_goal=True,
+                                    normalize_aim_output= True,
+                                    device = self.device,
+                                    init_goal=init_goal) 
     def init_env(self,cfg):
         cfg.max_episode_timesteps = max_episode_timesteps_dict[cfg.env]
         cfg.num_seed_steps = num_seed_steps_dict[cfg.env]
