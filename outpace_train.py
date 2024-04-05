@@ -216,19 +216,20 @@ class Workspace(object):
             from hgg.hgg import TrajectoryPool, MatchSampler            
             self.init_hgg_achieved_trajectory_pool(cfg)
             self.init_hgg_sampler(cfg)
-       
             
         self.init_video_recorders(cfg)
         self.step = 0
         
         
         self.uniform_goal_sampler =  UniformFeasibleGoalSampler(env_name=cfg.env)
+        self.init_dt_sampler(obs_spec,action_spec)
+
     def init_dt_sampler(self, obs_spec, action_spec):
         from hgg.dt_hgg import DTSampler
         from dt.models.decision_transformer import DecisionTransformer
         from dt.training.seq_trainer import SequenceStateTrainer
-        state_dim = obs_spec.shape()
-        act_dim = action_spec.shape()
+        state_dim = 2
+        act_dim = 2
         max_length = 100
         max_ep_length = 100
         embed_dim =  128
@@ -242,6 +243,7 @@ class Workspace(object):
         weight_decay = 1e-4
         warmup_steps = 10000
         init_goal = self.eval_env.convert_obs_to_dict(self.eval_env.reset())['achieved_goal'].copy()
+        original_final_goal = get_original_final_goal(self.cfg.env)
         dt = DecisionTransformer(state_dim = state_dim,
                                  act_dim = act_dim,
                                  max_length = max_length,
@@ -253,6 +255,7 @@ class Workspace(object):
                                  n_positions = n_positions,
                                  resid_pdrop = resid_pdrop,
                                  attn_pdrop = attn_pdrop)
+        dt = dt.to(self.device)
         optimizer = torch.optim.AdamW(
             dt.parameters(),
             lr=learning_rate,
@@ -263,7 +266,7 @@ class Workspace(object):
             lambda steps: min((steps+1)/warmup_steps, 1)
         )
         
-
+        agent = self.get_agent()
         
         self.dt_sampler = DTSampler(dt = dt,
                                     achieved_trajectory_pool=self.hgg_achieved_trajectory_pool,
@@ -271,7 +274,13 @@ class Workspace(object):
                                     add_noise_to_goal=True,
                                     normalize_aim_output= True,
                                     device = self.device,
-                                    init_goal=init_goal) 
+                                    init_goal=init_goal,
+                                    optimizer = optimizer,
+                                    agent = agent,
+                                    original_final_goal = original_final_goal,
+                                    env_lower_bound = self.uniform_goal_sampler.LOWER_CONTEXT_BOUNDS,
+                                    env_upper_bound = self.uniform_goal_sampler.UPPER_CONTEXT_BOUNDS)
+                                     
     def init_env(self,cfg):
         cfg.max_episode_timesteps = max_episode_timesteps_dict[cfg.env]
         cfg.num_seed_steps = num_seed_steps_dict[cfg.env]
@@ -629,14 +638,18 @@ class Workspace(object):
         hgg_start_time = time.time()
         hgg_sampler.update(initial_goals, desired_goals, replay_buffer = self.expl_buffer, meta_nml_epoch=episode) # dont think about initial_goals, they are not used
         # print('hgg sampler update step : {} time : {}'.format(self.step, time.time() - hgg_start_time))
-
+    def dt_hgg_update(self, episode_observes):
+        self.dt_sampler.update(episode_observes=episode_observes)
     def _run(self):        
         episode, episode_reward, episode_step, start_time, recent_sampled_goals, done, info, current_pocket_success, current_pocket_trial = self.run_init()
         agent = self.get_agent()
-
+        debug_sampled_goals = Queue(15)
+        # qs = Queue(100) # TODO change it into list later
+        first_time = True
         while self.step <= self.cfg.num_train_steps:
             
             if done:
+                qs = []
                 if self.step > 0:
                     current_pocket_trial += 1
                     if info['is_success']:
@@ -659,10 +672,13 @@ class Workspace(object):
                     self.logger.log('train/episode_reward', episode_reward, self.step)
                     self.logger.log('train/episode', episode, self.step)
                 
-                obs = self.hgg_sample(recent_sampled_goals)
+                # obs = self.hgg_sample(recent_sampled_goals)
+                
+            
                 
                 final_goal = self.env.goal.copy()                
-                
+                # obs = self.hgg_sample(recent_sampled_goals)
+                obs = self.dt_hgg_sample(debug_sampled_goals)
                     
                 self.logger.log('train/episode_finalgoal_dist', np.linalg.norm(final_goal), self.step)
                 if self.cfg.use_hgg:
@@ -673,7 +689,7 @@ class Workspace(object):
                         
 
 
-                self.visualize_training(episode, recent_sampled_goals, agent, obs)
+                self.visualize_training(episode, debug_sampled_goals, agent, obs)
 
 
                 episode_reward = 0
@@ -700,7 +716,8 @@ class Workspace(object):
             self.periodic_save()  
             action = self.get_agent_act(obs)
             logging_dict = agent.update(replay_buffer, self.randomwalk_buffer, self.aim_expl_buffer, self.step, self.env, self.goal_buffer)
-            
+            qs.append([logging_dict['q1'],logging_dict['q2']])
+            # qs.append(logging_dict[])()
             if self.step % self.cfg.logging_frequency== 0:                
                 if logging_dict is not None: # when step = 0                                        
                     for key, val in logging_dict.items():
@@ -725,6 +742,7 @@ class Workspace(object):
                 
             if last_timestep:
                 self.last_timestep_save(episode_observes, replay_buffer)
+                self.dt_hgg_update(episode_observes=episode_observes, qs = qs)
                 
                     
                     
@@ -1032,6 +1050,28 @@ class Workspace(object):
             assert (sampled_goal == self.env.goal.copy()).all()
         else:
             obs = self.env.reset()
+        return obs
+    def dt_hgg_sample(self, recent_sampled_goals):
+        obs = None
+        dt_sampler = self.dt_sampler
+        n_iter = 0
+        while True:
+                    # print('hgg sampler pool len : {} step : {}'.format(len(hgg_sampler.pool), self.step))
+            sampled_goal = dt_sampler.sample().copy()   # TODO delete the clone if you deem it unnecessary              
+            obs = self.env.reset(goal = sampled_goal)
+
+            if not self.env.is_successful(obs):
+                break
+            n_iter +=1
+            if n_iter==10:
+                break
+
+        if recent_sampled_goals.full():
+            recent_sampled_goals.get()
+        # sampled_goal = dt_sampler.sample().copy()
+        recent_sampled_goals.put(sampled_goal)
+                # obs = self.env.reset(goal = sampled_goal)
+        assert (sampled_goal == self.env.goal.copy()).all()
         return obs
 
     def run_init(self):
