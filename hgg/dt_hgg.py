@@ -12,7 +12,34 @@ def goal_concat(obs, goal):
 	return torch.concatenate([obs, goal], axis=0)
 
 
-
+def min_squared_error(predictions, targets):
+    """
+    Compute the minimum squared error between predictions and targets.
+    
+    Parameters:
+    - predictions: Tensor of model predictions
+    - targets: Tensor of target values
+    
+    Returns:
+    - min_se: The minimum squared error
+    """
+    squared_errors = (predictions - targets) ** 2
+    min_se = torch.min(squared_errors)
+    return min_se
+def max_squared_error(predictions, targets):
+    """
+    Compute the minimum squared error between predictions and targets.
+    
+    Parameters:
+    - predictions: Tensor of model predictions
+    - targets: Tensor of target values
+    
+    Returns:
+    - min_se: The minimum squared error
+    """
+    squared_errors = (predictions - targets) ** 2
+    max_se = torch.max(squared_errors)
+    return max_se
 class TrajectoryPool:
 	def __init__(self, pool_length):
 		self.length = pool_length
@@ -64,6 +91,9 @@ class DTSampler:
 		self.original_final_goal = original_final_goal
 		self.env_lower_bound = env_lower_bound
 		self.env_upper_bound = env_upper_bound
+		self.downscaled_original_final_goal = self.downscale_goals([original_final_goal])
+		self.downscaled_original_final_goal = torch.tensor(self.downscaled_original_final_goal, dtype=torch.float32, requires_grad=True)
+
 		# self.pool = np.tile(init_goal[np.newaxis,:],[self.length,1])+np.random.normal(0,self.delta,size=(self.length,self.dim))
 
 	def convert_data_to_rtg(obs, rewards):
@@ -80,10 +110,10 @@ class DTSampler:
 
 	def scale_position(self, pos, old_bounds, new_bounds):
 		"""Scales a 2D position from one range to another for both x and y components."""
-		return (
+		return [
 			self.scale_value(pos[0], old_bounds[0][0], old_bounds[1][0], new_bounds[0][0], new_bounds[1][0]),
 			self.scale_value(pos[1], old_bounds[0][1], old_bounds[1][1], new_bounds[0][1], new_bounds[1][1])
-		)
+		]
 
 
 	def custom_loss(self, achieved_goals_tensor, desired_goals_tensor):
@@ -96,17 +126,18 @@ class DTSampler:
 		# Assuming generate_achieved_values returns a scalar or tensor that represents some form of loss or value
 		# you want to minimize. Ensure it's computed correctly.
 		achieved_value = self.generate_achieved_values(achieved_goals_tensor[0], achieved_goals_tensor[1:])
-		achieved_value_loss = self.normalize_achieved_value(achieved_value)
-		achieved_loss_tensor = torch.tensor(achieved_value_loss, dtype=torch.float32, requires_grad=True)
-		
+		# achieved_value_loss = self.normalize_achieved_value(achieved_value)
+		# achieved_loss_tensor = torch.tensor(achieved_value_loss, dtype=torch.float32, requires_grad=True)
+		euclid_distance_loss = mse_loss_fn(self.downscaled_original_final_goal,desired_goals_tensor[0])
 		# achieved_loss_tensor = -torch.mean(achieved_loss_tensor)
-		achieved_loss_tensor = -torch.mean(achieved_loss_tensor)
-		adjusted_achieved_aim_loss = achieved_loss_tensor * self.gamma
+		achieved_value = -torch.mean(achieved_value)
+		adjusted_achieved_aim_loss = achieved_value * self.gamma
 		adjusted_achievability_loss = achievability_loss * self.alpha
+		adjusted_euclid_distance_loss = euclid_distance_loss * self.sigma
 		# Combine loss components
 		# Make sure both components are tensors and on the same device.
 		# Adjust coefficients as necessary. Ensure alpha and gamma are defined and are tensors or scalars.
-		total_loss = adjusted_achievability_loss+ adjusted_achieved_aim_loss
+		total_loss = adjusted_achievability_loss+ adjusted_achieved_aim_loss + adjusted_euclid_distance_loss
 		print(adjusted_achievability_loss,adjusted_achieved_aim_loss,total_loss)
 
 		return total_loss
@@ -117,7 +148,7 @@ class DTSampler:
 	def train(self, achieved_goals, desired_goal,qs):
 		
 
-		desired_goals = [desired_goal for _ in achieved_goals]
+		desired_goals = [[0.5,0.5] for _ in achieved_goals]
 		achieved_goals = self.downscale_goals(achieved_goals)
 		desired_goals = self.downscale_goals(desired_goals)
 		desired_goals = torch.tensor(desired_goals, dtype=torch.float32, requires_grad=True)
@@ -126,11 +157,11 @@ class DTSampler:
 		
 
 		loss = self.custom_loss(achieved_goals,desired_goals)
-
+		loss = self.loss_fn(achieved_goals,desired_goals)
 		self.optimizer.zero_grad()
 		loss.backward()
 
-		# torch.nn.utils.clip_grad_norm_(self.dt.parameters(), .5)
+		torch.nn.utils.clip_grad_norm_(self.dt.parameters(), .5)
 		self.optimizer.step()		
 	
 	# def train_on_out_of_bounds(generated_goal):
@@ -169,7 +200,8 @@ class DTSampler:
 		with torch.no_grad(): ## when using no_grad, no gradients will be calculated or stored for operations on tensors, which can reduce memory usage and speed up computations				
 			obs_t = torch.from_numpy(np.stack(obs, axis =0)).float().to(self.device) #[ts, dim]				
 			if (self.agent.aim_discriminator is not None) :#and ('aim_f' in self.cost_type): # or value function is proxy for aim outputs
-				value = -self.agent.aim_discriminator(obs_t).detach().cpu().numpy()[:, 0] 															
+				value = -self.agent.aim_discriminator(obs_t) 		
+				value = value[:, 0]											
 		
 		return value
 	
@@ -195,10 +227,29 @@ class DTSampler:
 			timesteps = torch.arange(0,100).to(device="cuda")
 			states = torch.tensor(self.last_achieved).to(device="cuda")
 			rtg = torch.tensor([1000]).to(device="cuda")
-		new_goal = self.dt.get_goal(states, rtg , timesteps)
+		while True:
+			new_goal = self.dt.get_goal(states, rtg , timesteps)
+			if new_goal[0] < -1 or new_goal[0] > 1 or new_goal[1] < -1 or new_goal[1] > 1:
+				self.train_for_out_of_bounds(new_goal)
+			else:
+				break
 		print(new_goal, end=" ")
 		return new_goal.detach().cpu().numpy()
 		
-	
+	def train_for_out_of_bounds(self, new_goal):
+		
+		if new_goal[0] > 0:
+			loss = (1 - new_goal[0]) ** 2
+		else:
+			loss = (-1 - new_goal[0]) ** 2
+		if new_goal[1] > 0:
+			loss += (1 - new_goal[1]) ** 2
+		else:
+			loss += (-1 - new_goal[1]) ** 2
+		
+		self.optimizer.zero_grad()
+		loss.backward()
+
+		self.optimizer.step()
 		
 	

@@ -277,7 +277,7 @@ class Workspace(object):
                                     init_goal=init_goal,
                                     optimizer = optimizer,
                                     agent = agent,
-                                    original_final_goal = original_final_goal,
+                                    original_final_goal = [original_final_goal[0],original_final_goal[1]],
                                     env_lower_bound = self.uniform_goal_sampler.LOWER_CONTEXT_BOUNDS,
                                     env_upper_bound = self.uniform_goal_sampler.UPPER_CONTEXT_BOUNDS)
                                      
@@ -638,13 +638,14 @@ class Workspace(object):
         hgg_start_time = time.time()
         hgg_sampler.update(initial_goals, desired_goals, replay_buffer = self.expl_buffer, meta_nml_epoch=episode) # dont think about initial_goals, they are not used
         # print('hgg sampler update step : {} time : {}'.format(self.step, time.time() - hgg_start_time))
-    def dt_hgg_update(self, episode_observes):
-        self.dt_sampler.update(episode_observes=episode_observes)
+    def dt_hgg_update(self, episode_observes,qs):
+        self.dt_sampler.update(episode_observes=episode_observes,qs=qs)
     def _run(self):        
         episode, episode_reward, episode_step, start_time, recent_sampled_goals, done, info, current_pocket_success, current_pocket_trial = self.run_init()
         agent = self.get_agent()
         debug_sampled_goals = Queue(15)
         # qs = Queue(100) # TODO change it into list later
+        qs = []
         first_time = True
         while self.step <= self.cfg.num_train_steps:
             
@@ -677,9 +678,9 @@ class Workspace(object):
             
                 
                 final_goal = self.env.goal.copy()                
-                # obs = self.hgg_sample(recent_sampled_goals)
                 obs = self.dt_hgg_sample(debug_sampled_goals)
-                    
+                obs = self.hgg_sample(recent_sampled_goals)
+
                 self.logger.log('train/episode_finalgoal_dist', np.linalg.norm(final_goal), self.step)
                 if self.cfg.use_hgg:
                     original_final_goal = get_original_final_goal(self.cfg.env)                    
@@ -716,7 +717,7 @@ class Workspace(object):
             self.periodic_save()  
             action = self.get_agent_act(obs)
             logging_dict = agent.update(replay_buffer, self.randomwalk_buffer, self.aim_expl_buffer, self.step, self.env, self.goal_buffer)
-            qs.append([logging_dict['q1'],logging_dict['q2']])
+            # qs.append([logging_dict['q1'],logging_dict['q2']])
             # qs.append(logging_dict[])()
             if self.step % self.cfg.logging_frequency== 0:                
                 if logging_dict is not None: # when step = 0                                        
@@ -1073,6 +1074,30 @@ class Workspace(object):
                 # obs = self.env.reset(goal = sampled_goal)
         assert (sampled_goal == self.env.goal.copy()).all()
         return obs
+    def dt_hgg_sample_debug(self, recent_sampled_goals):
+        obs = None
+        dt_sampler = self.dt_sampler
+        n_iter = 0
+        sampled_goal = dt_sampler.sample().copy()
+        while True:
+                    # print('hgg sampler pool len : {} step : {}'.format(len(hgg_sampler.pool), self.step))
+            sampled_goal = dt_sampler.sample().copy()   # TODO delete the clone if you deem it unnecessary              
+            obs = self.env.reset(goal = sampled_goal)
+
+            if not self.env.is_successful(obs):
+                break
+            n_iter +=1
+            if n_iter==10:
+                break
+
+        if recent_sampled_goals.full():
+            recent_sampled_goals.get()
+        # sampled_goal = dt_sampler.sample().copy()
+        recent_sampled_goals.put(sampled_goal)
+                # obs = self.env.reset(goal = sampled_goal)
+        assert (sampled_goal == self.env.goal.copy()).all()
+        return obs
+    
 
     def run_init(self):
         episode, episode_reward, episode_step = 0, 0, 0
