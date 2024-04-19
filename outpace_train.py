@@ -3,7 +3,8 @@ from random import random, uniform
 os.environ['MUJOCO_GL'] = 'egl'
 os.environ['EGL_DEVICE_ID'] = '0'
 
-
+from hgg.dt_hgg import DTSampler
+from dt.models.decision_transformer import DecisionTransformer
 import copy
 import pickle as pkl
 import sys
@@ -223,6 +224,24 @@ class Workspace(object):
         
         
         self.uniform_goal_sampler =  UniformFeasibleGoalSampler(env_name=cfg.env)
+
+    def init_dt_sampler(self, obs_dim, goal_dim):
+        
+
+        dt = DecisionTransformer(state_dim = obs_dim,
+                                 act_dim= goal_dim,
+                                 max_length = 100, 
+                                 max_ep_len=100,
+                                 hidden_size = 128,
+                                 n_layer = 3, # TODO check this out
+                                 n_head = 1, #TODO check this out
+                                 n_inner = 4* 128,
+                                 activation_func = None,
+                                 n_positions = 'tanh',
+                                 resid_pdrop = 0.1,
+                                 attn_pdrop = 0.1)
+        self.dtsampler = DTSampler()
+
     def init_env(self,cfg):
         cfg.max_episode_timesteps = max_episode_timesteps_dict[cfg.env]
         cfg.num_seed_steps = num_seed_steps_dict[cfg.env]
