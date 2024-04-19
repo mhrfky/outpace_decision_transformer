@@ -1,0 +1,184 @@
+import copy
+import numpy as np
+from hgg.gcc_utils import gcc_load_lib, c_double, c_int
+import torch
+import torch.nn.functional as F
+import time
+
+
+def goal_distance(goal_a, goal_b):
+	return np.linalg.norm(goal_a - goal_b, ord=2)
+def goal_concat(obs, goal):
+	return np.concatenate([obs, goal], axis=0)
+
+class TrajectoryPool:
+	def __init__(self, pool_length):
+		self.length = pool_length
+		self.pool = []
+		self.pool_init_state = []
+		self.counter = 0
+
+	def insert(self, trajectory, init_state):
+		if self.counter<self.length:
+			self.pool.append(trajectory.copy())
+			self.pool_init_state.append(init_state.copy())
+		else:
+			self.pool[self.counter%self.length] = trajectory.copy()
+			self.pool_init_state[self.counter%self.length] = init_state.copy()
+		self.counter += 1
+
+	def pad(self):
+		if self.counter>=self.length:
+			return copy.deepcopy(self.pool), copy.deepcopy(self.pool_init_state)
+		pool = copy.deepcopy(self.pool)
+		pool_init_state = copy.deepcopy(self.pool_init_state)
+		while len(pool)<self.length:
+			pool += copy.deepcopy(self.pool)
+			pool_init_state += copy.deepcopy(self.pool_init_state)
+		return copy.deepcopy(pool[:self.length]), copy.deepcopy(pool_init_state[:self.length])
+
+class DTSampler:    
+	def __init__(self, goal_env, goal_eval_env, env_name, achieved_trajectory_pool, num_episodes,				
+				agent = None, max_episode_timesteps =None, split_ratio_for_meta_nml=0.1, split_type_for_meta_nml='last', normalize_aim_output=False,
+				add_noise_to_goal= False, cost_type='meta_nml_aim_f', gamma=0.99, hgg_c=3.0, hgg_L=5.0, device = 'cuda', hgg_gcc_path = None
+				
+				):
+		# Assume goal env
+		self.env = goal_env
+		self.eval_env = goal_eval_env
+		self.env_name = env_name
+		
+		self.add_noise_to_goal = add_noise_to_goal
+		self.cost_type = cost_type
+		self.agent = agent
+		
+		self.vf = None
+		self.critic = None
+		self.policy = None
+
+		self.max_episode_timesteps = max_episode_timesteps
+		self.split_ratio_for_meta_nml = split_ratio_for_meta_nml
+		self.split_type_for_meta_nml = split_type_for_meta_nml
+		self.normalize_aim_output = normalize_aim_output
+		self.gamma = gamma
+		self.hgg_c = hgg_c
+		self.hgg_L = hgg_L
+		self.device = device
+  		
+		self.success_threshold = {'AntMazeSmall-v0' : 1.0, # 0.5,
+								  'PointUMaze-v0' : 0.5,
+          						  'PointNMaze-v0' : 0.5,
+								  'sawyer_peg_push' : getattr(self.env, 'TARGET_RADIUS', None),
+								  'sawyer_peg_pick_and_place' : getattr(self.env, 'TARGET_RADIUS', None),
+								  'PointSpiralMaze-v0' : 0.5,								  
+								}
+		self.loss_function = torch.nn.BCELoss(reduction='none')
+
+		self.dim = np.prod(self.env.convert_obs_to_dict(self.env.reset())['achieved_goal'].shape)
+		self.delta = self.success_threshold[env_name] #self.env.distance_threshold
+		self.goal_distance = goal_distance
+
+		self.length = num_episodes # args.episodes
+		
+		init_goal = self.eval_env.convert_obs_to_dict(self.eval_env.reset())['achieved_goal'].copy()
+		
+		self.pool = np.tile(init_goal[np.newaxis,:],[self.length,1])+np.random.normal(0,self.delta,size=(self.length,self.dim))
+		
+
+		self.match_lib = gcc_load_lib(hgg_gcc_path+'/cost_flow.c')
+		
+		self.achieved_trajectory_pool = achieved_trajectory_pool
+
+		# estimating diameter
+		self.max_dis = 0
+		for i in range(1000):			
+			obs = self.env.convert_obs_to_dict(self.env.reset())
+			dis = self.goal_distance(obs['achieved_goal'],obs['desired_goal'])
+			if dis>self.max_dis: self.max_dis = dis 
+	
+
+ 
+	def sample(self, idx):
+		if self.add_noise_to_goal:
+			if self.env_name in ['AntMazeSmall-v0', 'PointUMaze-v0', "PointSpiralMaze-v0", "PointNMaze-v0"]:
+				noise_std = 0.5
+			elif self.env_name in ['sawyer_peg_push', 'sawyer_peg_pick_and_place']:
+				noise_std = 0.05
+			else:
+				raise NotImplementedError('Should consider noise scale env by env')
+			return self.add_noise(self.pool[idx], noise_std = noise_std)
+		else:
+			return self.pool[idx].copy()
+	
+	def generate_achieved_value(self,achieved_pool_init_state,achieved_pool):
+		achieved_value = []		
+		for i in range(len(achieved_pool)):
+			 # maybe for all timesteps in an episode
+			obs = [goal_concat(achieved_pool_init_state[i], achieved_pool[i][j]) for  j in range(achieved_pool[i].shape[0])] # list of [dim] (len = ts)
+																															 # merge of achieved_pool and achieved_pool_init_state to draw trajectory
+			
+			with torch.no_grad(): ## when using no_grad, no gradients will be calculated or stored for operations on tensors, which can reduce memory usage and speed up computations				
+				obs_t = torch.from_numpy(np.stack(obs, axis =0)).float().to(self.device) #[ts, dim]				
+				if (self.agent.aim_discriminator is not None) and ('aim_f' in self.cost_type): # or value function is proxy for aim outputs
+					value = -self.agent.aim_discriminator(obs_t).detach().cpu().numpy()[:, 0] # TODO discover inside aim_discriminator,
+																							  # 	* what kind of inputs it does require
+																							  # 	* value can be interpreted as a measure of how desirable or advantageous the current state is from the perspective of achieving the final goal
+																							
+					# value = np.clip(value, -1.0/(1.0-self.gamma), 0)
+			if 'aim_f' in self.cost_type:				
+				achieved_value.append(value.copy())			
+			elif 'meta_nml' in self.cost_type:			
+				pass			
+			else:
+				raise NotImplementedError
+		return achieved_value
+	
+	def normalize_achieved_value(self,achieved_value):
+		if 'aim_f' in self.cost_type: #normalizing achieved_values
+			# print('normalize aim output in hgg update!')
+			# For considering different traj length
+			aim_outputs_max = -np.inf
+			aim_outputs_min = np.inf
+			for i in range(len(achieved_value)): # list of aim_output [ts,]
+				if achieved_value[i].max() > aim_outputs_max:
+					aim_outputs_max = achieved_value[i].max()
+				if achieved_value[i].min() < aim_outputs_min:
+					aim_outputs_min = achieved_value[i].min()
+			for i in range(len(achieved_value)):
+				achieved_value[i] = ((achieved_value[i]-aim_outputs_min)/(aim_outputs_max - aim_outputs_min+0.00001)-0.5)*2 #[0, 1] -> [-1,1]
+				
+
+	
+	def update(self, initial_goals, desired_goals, replay_buffer = None, meta_nml_epoch = 0):
+		
+		if self.achieved_trajectory_pool.counter==0:
+			self.pool = copy.deepcopy(desired_goals)
+			return
+		
+		#achieved pool has the whole trajectory throughtout the episode, while achieved_pool_init_state has the initial state where it started the episode
+		achieved_pool, achieved_pool_init_state = self.achieved_trajectory_pool.pad() # dont care about pad, it receives the stored achieved trajectories
+		# for meta nml computational efficiency, jump 5% of max timesteps
+		## there is no process done by meta-nml here to replace with decision transformer
+		if 'meta_nml' in self.cost_type: # shortens every tracjectory inside achieved_pool 
+			achieved_pool = self.meta_nml_shorten_trajectory(achieved_pool=achieved_pool)
+
+		assert len(achieved_pool)>=self.length, 'If not, errors at assert match_count==self.length, e.g. len(achieved_pool)=5, self.length=25, match_count=5'
+		if 'aim_f' in self.cost_type: 
+			assert self.agent.aim_discriminator is not None
+
+
+		achieved_value = self.generate_achieved_value(achieved_pool_init_state,achieved_pool)
+		self.normalize_achieved_value(achieved_value)
+
+		if 'meta_nml' in self.cost_type:
+			classification_probs =self.meta_nml_generate_reshaped_classification_probs(meta_nml_epoch=meta_nml_epoch,achieved_pool=achieved_pool,replay_buffer=replay_buffer)
+
+		self.generate_goals(achieved_pool,desired_goals,classification_probs,achieved_value)
+
+		
+
+	def generate_goals(self,achieved_pool,desired_goals,classification_probs,achieved_value):
+
+		pass
+
+
