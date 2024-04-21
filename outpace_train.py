@@ -236,8 +236,8 @@ class Workspace(object):
                                  n_layer = 3, # TODO check this out
                                  n_head = 1, #TODO check this out
                                  n_inner = 4* 128,
-                                 activation_func = None,
-                                 n_positions = 'tanh',
+                                 activation_func = 'relu', # TODO check out other loss functions that can be used
+                                 n_positions = 1024,
                                  resid_pdrop = 0.1,
                                  attn_pdrop = 0.1)
         self.dtsampler = DTSampler()
