@@ -226,7 +226,6 @@ class Workspace(object):
         self.uniform_goal_sampler =  UniformFeasibleGoalSampler(env_name=cfg.env)
 
     def init_dt_sampler(self, obs_dim, goal_dim):
-        
 
         dt = DecisionTransformer(state_dim = obs_dim,
                                  act_dim= goal_dim,
@@ -240,7 +239,14 @@ class Workspace(object):
                                  n_positions = 1024,
                                  resid_pdrop = 0.1,
                                  attn_pdrop = 0.1)
-        self.dtsampler = DTSampler()
+        
+        optimizer = torch.optim.AdamW(
+            dt.parameters(),
+            lr=1e-4,
+            weight_decay=1e-4,
+        )
+
+        self.dtsampler = DTSampler(self.env, self.eval_env, agent = self.get_agent(), state_optimizer= optimizer)
 
     def init_env(self,cfg):
         cfg.max_episode_timesteps = max_episode_timesteps_dict[cfg.env]

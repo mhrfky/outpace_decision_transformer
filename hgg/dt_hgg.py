@@ -44,8 +44,8 @@ class TrajectoryPool:
 		return copy.deepcopy(pool[:self.length]), copy.deepcopy(pool_init_state[:self.length])
 
 class DTSampler:    
-	def __init__(self, goal_env, goal_eval_env, env_name, achieved_trajectory_pool, num_episodes,				
-				agent = None, max_episode_timesteps =None,  normalize_aim_output=False,
+	def __init__(self, goal_env, goal_eval_env, 				
+				agent = None,
 				add_noise_to_goal= False, sigma = 1, gamma=0.99, device = 'cuda', critic = None, 
 				dt : DecisionTransformer = None, rtg_optimizer = None, state_optimizer = None,
 				loss_fn  = torch.nn.MSELoss(),
@@ -53,7 +53,6 @@ class DTSampler:
 		# Assume goal env
 		self.env = goal_env
 		self.eval_env = goal_eval_env
-		self.env_name = env_name
 		
 		self.add_noise_to_goal = add_noise_to_goal
 		self.agent = agent
@@ -61,8 +60,6 @@ class DTSampler:
 		self.state_optimizer = state_optimizer
 		self.critic = critic
 
-		self.max_episode_timesteps = max_episode_timesteps
-		self.normalize_aim_output = normalize_aim_output
 		self.gamma = gamma
 
 		self.device = device
@@ -77,19 +74,18 @@ class DTSampler:
 		self.loss_fn = torch.nn.MSELoss()
 
 		self.dim = np.prod(self.env.convert_obs_to_dict(self.env.reset())['achieved_goal'].shape)
-		self.delta = self.success_threshold[env_name] #self.env.distance_threshold
 		self.goal_distance = goal_distance
 
-		self.length = num_episodes 
 		
-		init_goal = self.eval_env.convert_obs_to_dict(self.eval_env.reset())['achieved_goal'].copy()
+		self.init_goal = self.eval_env.convert_obs_to_dict(self.eval_env.reset())['achieved_goal'].copy()
 		
-		self.pool = np.tile(init_goal[np.newaxis,:],[self.length,1])+np.random.normal(0,self.delta,size=(self.length,self.dim))
 				
-		self.achieved_trajectory_pool = achieved_trajectory_pool    
 
 		self.latest_achieved = None
-
+		self.dt = dt
+		self.loss_fn = loss_fn
+		self.max_achieved_reward = 0
+		self.return_to_add = 0.05
 	def reward_to_rtg(self,rewards):
 		rtg = discount_cumsum(rewards)
 
@@ -97,15 +93,16 @@ class DTSampler:
 
 
 
-	def sample(self, episode_observes):
+	def sample(self, episode_observes = None):
 		if episode_observes is None:
+			self.generate_goal(self.latest_achieved,[self.max_achieved_reward + self.return_to_add])
 			pass # TODO work on latest_episode 
 		else:
 			pass # TODO work on the episode observes, instead of residual walking this might be better to implement
 
-	def generate_achieved_value(self,achieved_pool_init_state,achieved_pool):
+	def generate_achieved_value(self,init_state,achieved_goals):
 		# maybe for all timesteps in an episode
-		obs = [goal_concat(achieved_pool_init_state, achieved_pool[j]) for  j in range(achieved_pool.shape[0])] # list of [dim] (len = ts)
+		obs = [goal_concat(init_state, achieved_goals[j]) for  j in range(achieved_goals.shape)] # list of [dim] (len = ts)
 																															# merge of achieved_pool and achieved_pool_init_state to draw trajectory
 		
 		with torch.no_grad(): ## when using no_grad, no gradients will be calculated or stored for operations on tensors, which can reduce memory usage and speed up computations				
@@ -132,38 +129,67 @@ class DTSampler:
 			for i in range(len(achieved_value)):
 				achieved_value[i] = ((achieved_value[i]-aim_outputs_min)/(aim_outputs_max - aim_outputs_min+0.00001)-0.5)*2 #[0, 1] -> [-1,1]
 				
+	def get_q_value(self,obs):
+		with torch.no_grad():
+			dist = self.actor(obs)
+			action = dist.rsample()
+
+			q1, q2 = self.critic(obs, action)
+
+			q_mean = torch.mean(q1,q2)
+			# q_max = torch.max(q1,q2)
+		return q_mean
 
 	
-	def update(self, achieved_goals, desired_goals, replay_buffer = None, meta_nml_epoch = 0):
+	def update(self, achieved_goals, qs):
 		
-		if self.achieved_trajectory_pool.counter==0:
-			self.pool = copy.deepcopy(desired_goals)
-			return
 		
 		#achieved pool has the whole trajectory throughtout the episode, while achieved_pool_init_state has the initial state where it started the episode
-		achieved_pool, achieved_pool_init_state = self.achieved_trajectory_pool.pad() # dont care about pad, it receives the stored achieved trajectories
-
-		assert len(achieved_pool)>=self.length, 'If not, errors at assert match_count==self.length, e.g. len(achieved_pool)=5, self.length=25, match_count=5'
-		if 'aim_f' in self.cost_type: 
-			assert self.agent.aim_discriminator is not None
+		# achieved_pool, achieved_pool_init_state = self.achieved_trajectory_pool.pad() # dont care about pad, it receives the stored achieved trajectories
 
 
-		achieved_value = self.generate_achieved_value(achieved_pool_init_state,achieved_pool)
-		# TODO estimate Q-values as well 
-  
-		self.normalize_achieved_value(achieved_value)
 
-		# TODO add training here
-		
+		achieved_values= self.generate_achieved_value(self.init_goal,achieved_goals)
+		rewards = self.gamma * achieved_values + (1-self.gamma) * qs
+		rtgs = self.reward_to_rtg(rewards)
+
+		self.train(achieved_goals, rtgs)		
 		self.latest_achieved = achieved_goals
-
+		
 	def train(self, achieved_goals, rtgs):
+		if type(achieved_goals) == torch.tensor:
+			achieved_goals = torch.tensor(achieved_goals, device="cuda")
+		if type(rtgs) == torch.tensor:
+			rtgs = torch.tensor(rtgs, device="cuda")
+		actions = torch.zeros(len(achieved_goals))
+		timesteps = torch.arange(0,100)
+		for i in range(1,len(achieved_goals)):
+			temp_actions = actions[:i].clone()
+			temp_timesteps = timesteps[:i].clone()
+			for j in range(i,len(achieved_goals)-1):
+				temp_achieved = achieved_goals[:i].clone()
+				temp_rtg = rtgs[:i].clone()
+				temp_rtg -= rtgs[j:j+1]
+				goal,_,_ = self.dt.forward(temp_achieved,temp_actions,None,temp_rtg,temp_timesteps)
+				init_goal_pair = goal_concat(achieved_goals[0], goal)
+				aim_val = self.agent.aim_discriminator(init_goal_pair)
+				q_val = self.get_q_value(goal)
+				goal_val = self.gamma * aim_val + q_val * (1-self.gamma)
+				loss = torch.nn.L1Loss(goal_val,temp_rtg[0])
+
+				self.state_optimizer.zero_grad()
+				loss.backward()
+				torch.nn.utils.clip_grad_norm_(self.model.parameters(), .25)
+				self.optimizer.step()
+			
 		pass
 		#TODO just generate a simple training
 		#TODO loop over all achieved_goals and predict on varying length of episodes
 
-	def generate_goal(self,achieved_goals,rtgs, return_to_add):
-		
-		pass
+	def generate_goal(self,achieved_goals,rtgs):
+		actions = torch.zeros(len(achieved_goals))
+		timesteps = torch.arange(0,100)
+		desired_goal = self.dt.get_state(achieved_goals, actions, None, rtgs, timesteps)
+		return desired_goal
 
 
