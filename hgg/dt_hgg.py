@@ -95,6 +95,8 @@ class DTSampler:
 
 	def sample(self, episode_observes = None):
 		if episode_observes is None:
+			if self.latest_achieved is None:
+				return np.array([0.6,0.6])
 			self.generate_goal(self.latest_achieved,[self.max_achieved_reward + self.return_to_add])
 			pass # TODO work on latest_episode 
 		else:
@@ -146,7 +148,7 @@ class DTSampler:
 		
 		#achieved pool has the whole trajectory throughtout the episode, while achieved_pool_init_state has the initial state where it started the episode
 		# achieved_pool, achieved_pool_init_state = self.achieved_trajectory_pool.pad() # dont care about pad, it receives the stored achieved trajectories
-
+		
 
 
 		achieved_values= self.generate_achieved_value(self.init_goal,achieved_goals)
@@ -155,6 +157,7 @@ class DTSampler:
 
 		self.train(achieved_goals, rtgs)		
 		self.latest_achieved = achieved_goals
+		self.max_achieved_reward = max(rtgs)
 		
 	def train(self, achieved_goals, rtgs):
 		if type(achieved_goals) == torch.tensor:

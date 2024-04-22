@@ -609,7 +609,7 @@ class Workspace(object):
     def _run(self):        
         episode, episode_reward, episode_step, start_time, recent_sampled_goals, done, info, current_pocket_success, current_pocket_trial = self.run_init()
         agent = self.get_agent()
-
+        first_iteration = True
         while self.step <= self.cfg.num_train_steps:
             
             if done:
@@ -622,7 +622,7 @@ class Workspace(object):
                     if self.cfg.use_hgg :
                         if episode % self.cfg.hgg_kwargs.hgg_sampler_update_frequency ==0 :                            
                             self.hgg_update(episode)
-                    
+                
 
 
 
@@ -635,8 +635,8 @@ class Workspace(object):
                     self.logger.log('train/episode_reward', episode_reward, self.step)
                     self.logger.log('train/episode', episode, self.step)
                 
-                obs = self.hgg_sample(recent_sampled_goals)
-                
+                # obs = self.hgg_sample(recent_sampled_goals)
+                obs = self.dt_hgg_sample(recent_sampled_goals)
                 final_goal = self.env.goal.copy()                
                 
                     
@@ -701,6 +701,7 @@ class Workspace(object):
                 
             if last_timestep:
                 self.last_timestep_save(episode_observes, replay_buffer)
+                
                 
                     
                     
@@ -1009,7 +1010,26 @@ class Workspace(object):
         else:
             obs = self.env.reset()
         return obs
+    def dt_hgg_sample(self, recent_sampled_goals):
+        obs = None
+        dt_hgg_sampler = self.dtsampler
+        n_iter = 0 
+        while True:
+            sampled_goal = dt_hgg_sampler.sample()
+            obs = self.env.reset(goal = sampled_goal)
 
+            if not self.env.is_succesful(obs):
+                break
+            n_iter +=1
+            if n_iter == 10:
+                break
+        if recent_sampled_goals.full():
+            recent_sampled_goals.get()
+        recent_sampled_goals.put(sampled_goal)
+
+        return obs
+
+        
     def run_init(self):
         episode, episode_reward, episode_step = 0, 0, 0
         inv_curriculum_pocket = []
