@@ -786,7 +786,7 @@ class OUTPACEAgent(object):
 
         # the same as above in terms of functionality
         if step < self.num_seed_steps:
-            return
+            return {}
         if self.use_aim:
             if step % self.aim_disc_update_frequency == 0 :
                 # assume goal concatenated to obs

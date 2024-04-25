@@ -86,8 +86,9 @@ class DTSampler:
 		self.loss_fn = loss_fn
 		self.max_achieved_reward = 0
 		self.return_to_add = 0.05
+		self.discount_rate = 0.99 #TODO add this as init value
 	def reward_to_rtg(self,rewards):
-		rtg = discount_cumsum(rewards)
+		rtg = discount_cumsum(rewards, self.discount_rate)
 
 		return rtg #TODO check if it is working properly
 
@@ -104,13 +105,12 @@ class DTSampler:
 
 	def generate_achieved_value(self,init_state,achieved_goals):
 		# maybe for all timesteps in an episode
-		obs = [goal_concat(init_state, achieved_goals[j]) for  j in range(achieved_goals.shape)] # list of [dim] (len = ts)
+		obs = [goal_concat(init_state, achieved_goals[j]) for  j in range(len(achieved_goals))] # list of [dim] (len = ts)
 																															# merge of achieved_pool and achieved_pool_init_state to draw trajectory
 		
 		with torch.no_grad(): ## when using no_grad, no gradients will be calculated or stored for operations on tensors, which can reduce memory usage and speed up computations				
 			obs_t = torch.from_numpy(np.stack(obs, axis =0)).float().to(self.device) #[ts, dim]				
-			if (self.agent.aim_discriminator is not None) and ('aim_f' in self.cost_type): # or value function is proxy for aim outputs
-				value = -self.agent.aim_discriminator(obs_t).detach().cpu().numpy()[:, 0] # TODO discover inside aim_discriminator,
+			value = -self.agent.aim_discriminator(obs_t).detach().cpu().numpy()[:, 0] # TODO discover inside aim_discriminator,
 																							# 	* what kind of inputs it does require
 																							# 	* value can be interpreted as a measure of how desirable or advantageous the current state is from the perspective of achieving the final goal
 																						
@@ -148,24 +148,27 @@ class DTSampler:
 		
 		#achieved pool has the whole trajectory throughtout the episode, while achieved_pool_init_state has the initial state where it started the episode
 		# achieved_pool, achieved_pool_init_state = self.achieved_trajectory_pool.pad() # dont care about pad, it receives the stored achieved trajectories
-		
+		if not len(qs):
+			qs = np.zeros(101,)
 
-
+		achieved_goals = np.array([self.eval_env.convert_obs_to_dict(achieved_goals[i])["achieved_goal"] for i in range(len(achieved_goals))])
 		achieved_values= self.generate_achieved_value(self.init_goal,achieved_goals)
 		rewards = self.gamma * achieved_values + (1-self.gamma) * qs
 		rtgs = self.reward_to_rtg(rewards)
+		qs = np.mean(qs, axis=0)
+		# qs = np.min(qs, axis = 1)
 
 		self.train(achieved_goals, rtgs)		
 		self.latest_achieved = achieved_goals
 		self.max_achieved_reward = max(rtgs)
 		
 	def train(self, achieved_goals, rtgs):
-		if type(achieved_goals) == torch.tensor:
-			achieved_goals = torch.tensor(achieved_goals, device="cuda")
-		if type(rtgs) == torch.tensor:
-			rtgs = torch.tensor(rtgs, device="cuda")
-		actions = torch.zeros(len(achieved_goals))
-		timesteps = torch.arange(0,100)
+		if type(achieved_goals) != torch.tensor:
+			achieved_goals = torch.tensor(achieved_goals, device="cuda", dtype=torch.float32)
+		if type(rtgs) != torch.tensor:
+			rtgs = torch.tensor(rtgs, device="cuda", dtype=torch.float32)
+		actions = torch.zeros((100,2), device="cuda",dtype=torch.float32 )
+		timesteps = torch.arange(0,100, device="cuda")
 		for i in range(1,len(achieved_goals)):
 			temp_actions = actions[:i].clone()
 			temp_timesteps = timesteps[:i].clone()

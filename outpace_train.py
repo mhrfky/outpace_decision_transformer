@@ -221,14 +221,14 @@ class Workspace(object):
             
         self.init_video_recorders(cfg)
         self.step = 0
-        
+        self.init_dt_sampler(2,2)
         
         self.uniform_goal_sampler =  UniformFeasibleGoalSampler(env_name=cfg.env)
 
     def init_dt_sampler(self, obs_dim, goal_dim):
 
-        dt = DecisionTransformer(state_dim = obs_dim,
-                                 act_dim= goal_dim,
+        dt = DecisionTransformer(state_dim = 2,
+                                 act_dim= 2,
                                  max_length = 100, 
                                  max_ep_len=100,
                                  hidden_size = 128,
@@ -245,8 +245,10 @@ class Workspace(object):
             lr=1e-4,
             weight_decay=1e-4,
         )
+        dt = dt.to(device=self.device)
 
-        self.dtsampler = DTSampler(self.env, self.eval_env, agent = self.get_agent(), state_optimizer= optimizer)
+
+        self.dt_sampler = DTSampler(self.env, self.eval_env, agent = self.get_agent(), state_optimizer= optimizer, dt= dt)
 
     def init_env(self,cfg):
         cfg.max_episode_timesteps = max_episode_timesteps_dict[cfg.env]
@@ -605,11 +607,15 @@ class Workspace(object):
         hgg_start_time = time.time()
         hgg_sampler.update(initial_goals, desired_goals, replay_buffer = self.expl_buffer, meta_nml_epoch=episode) # dont think about initial_goals, they are not used
         # print('hgg sampler update step : {} time : {}'.format(self.step, time.time() - hgg_start_time))
+    def dt_sampler_update(self, episode_observes, qs):
+        self.dt_sampler.update(episode_observes, qs)
 
     def _run(self):        
         episode, episode_reward, episode_step, start_time, recent_sampled_goals, done, info, current_pocket_success, current_pocket_trial = self.run_init()
         agent = self.get_agent()
         first_iteration = True
+        qs = np.array([])
+
         while self.step <= self.cfg.num_train_steps:
             
             if done:
@@ -635,8 +641,8 @@ class Workspace(object):
                     self.logger.log('train/episode_reward', episode_reward, self.step)
                     self.logger.log('train/episode', episode, self.step)
                 
-                # obs = self.hgg_sample(recent_sampled_goals)
-                obs = self.dt_hgg_sample(recent_sampled_goals)
+                obs = self.hgg_sample(recent_sampled_goals)
+                obs = self.dt_sample(recent_sampled_goals)
                 final_goal = self.env.goal.copy()                
                 
                     
@@ -677,6 +683,7 @@ class Workspace(object):
             action = self.get_agent_act(obs)
             logging_dict = agent.update(replay_buffer, self.randomwalk_buffer, self.aim_expl_buffer, self.step, self.env, self.goal_buffer)
             
+            np.append(qs,[logging_dict.get('q1',0),logging_dict.get('q2',0)])
             if self.step % self.cfg.logging_frequency== 0:                
                 if logging_dict is not None: # when step = 0                                        
                     for key, val in logging_dict.items():
@@ -701,7 +708,7 @@ class Workspace(object):
                 
             if last_timestep:
                 self.last_timestep_save(episode_observes, replay_buffer)
-                
+                self.dt_sampler_update(episode_observes, qs)
                 
                     
                     
@@ -1010,15 +1017,15 @@ class Workspace(object):
         else:
             obs = self.env.reset()
         return obs
-    def dt_hgg_sample(self, recent_sampled_goals):
+    def dt_sample(self, recent_sampled_goals):
         obs = None
-        dt_hgg_sampler = self.dtsampler
+        dt_hgg_sampler = self.dt_sampler
         n_iter = 0 
         while True:
             sampled_goal = dt_hgg_sampler.sample()
             obs = self.env.reset(goal = sampled_goal)
 
-            if not self.env.is_succesful(obs):
+            if not self.env.is_successful(obs):
                 break
             n_iter +=1
             if n_iter == 10:
