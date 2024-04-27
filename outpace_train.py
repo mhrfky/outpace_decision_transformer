@@ -229,8 +229,8 @@ class Workspace(object):
 
         dt = DecisionTransformer(state_dim = 2,
                                  act_dim= 2,
-                                 max_length = 100, 
-                                 max_ep_len=100,
+                                 max_length = 128, 
+                                 max_ep_len=128,
                                  hidden_size = 128,
                                  n_layer = 3, # TODO check this out
                                  n_head = 1, #TODO check this out
@@ -607,8 +607,8 @@ class Workspace(object):
         hgg_start_time = time.time()
         hgg_sampler.update(initial_goals, desired_goals, replay_buffer = self.expl_buffer, meta_nml_epoch=episode) # dont think about initial_goals, they are not used
         # print('hgg sampler update step : {} time : {}'.format(self.step, time.time() - hgg_start_time))
-    def dt_sampler_update(self, episode_observes, qs):
-        self.dt_sampler.update(episode_observes, qs)
+    def dt_sampler_update(self,step, episode_observes, qs):
+        self.dt_sampler.update(step, episode_observes, qs)
 
     def _run(self):        
         episode, episode_reward, episode_step, start_time, recent_sampled_goals, done, info, current_pocket_success, current_pocket_trial = self.run_init()
@@ -641,7 +641,7 @@ class Workspace(object):
                     self.logger.log('train/episode_reward', episode_reward, self.step)
                     self.logger.log('train/episode', episode, self.step)
                 
-                obs = self.hgg_sample(recent_sampled_goals)
+                # obs = self.hgg_sample(recent_sampled_goals)
                 obs = self.dt_sample(recent_sampled_goals)
                 final_goal = self.env.goal.copy()                
                 
@@ -708,7 +708,7 @@ class Workspace(object):
                 
             if last_timestep:
                 self.last_timestep_save(episode_observes, replay_buffer)
-                self.dt_sampler_update(episode_observes, qs)
+                self.dt_sampler_update(self.step, episode_observes, qs)
                 
                     
                     

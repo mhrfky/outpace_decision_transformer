@@ -11,6 +11,8 @@ def goal_distance(goal_a, goal_b):
 	return np.linalg.norm(goal_a - goal_b, ord=2)
 def goal_concat(obs, goal):
 	return np.concatenate([obs, goal], axis=0)
+def goal_concat_t(obs, goal):
+	return torch.concatenate([obs, goal], axis=0)
 def discount_cumsum(x, gamma):
     discount_cumsum = np.zeros_like(x)
     discount_cumsum[-1] = x[-1]
@@ -46,9 +48,9 @@ class TrajectoryPool:
 class DTSampler:    
 	def __init__(self, goal_env, goal_eval_env, 				
 				agent = None,
-				add_noise_to_goal= False, sigma = 1, gamma=0.99, device = 'cuda', critic = None, 
+				add_noise_to_goal= False, beta = 1/20, gamma=1, device = 'cuda', critic = None, 
 				dt : DecisionTransformer = None, rtg_optimizer = None, state_optimizer = None,
-				loss_fn  = torch.nn.MSELoss(),
+				loss_fn  = torch.nn.MSELoss()
 				):
 		# Assume goal env
 		self.env = goal_env
@@ -61,9 +63,10 @@ class DTSampler:
 		self.critic = critic
 
 		self.gamma = gamma
+		self.beta = beta
 
 		self.device = device
-  		
+		self.num_seed_steps = 2000	 # TODO init this from config later
 		self.success_threshold = {'AntMazeSmall-v0' : 1.0, # 0.5,
 								  'PointUMaze-v0' : 0.5,
 		  						  'PointNMaze-v0' : 0.5,
@@ -98,8 +101,8 @@ class DTSampler:
 		if episode_observes is None:
 			if self.latest_achieved is None:
 				return np.array([0.6,0.6])
-			self.generate_goal(self.latest_achieved,[self.max_achieved_reward + self.return_to_add])
-			pass # TODO work on latest_episode 
+			goal_t =  self.generate_goal(self.latest_achieved,[self.max_achieved_reward + self.return_to_add])
+			return goal_t.detach().cpu().numpy()
 		else:
 			pass # TODO work on the episode observes, instead of residual walking this might be better to implement
 
@@ -131,35 +134,40 @@ class DTSampler:
 			for i in range(len(achieved_value)):
 				achieved_value[i] = ((achieved_value[i]-aim_outputs_min)/(aim_outputs_max - aim_outputs_min+0.00001)-0.5)*2 #[0, 1] -> [-1,1]
 				
-	def get_q_value(self,obs):
+	def get_q_value(self,goal_t):
+		goal = goal_t.detach().cpu().numpy()
 		with torch.no_grad():
-			dist = self.actor(obs)
+			obs = self.eval_env.reset(goal=goal)
+			obs_t = torch.tensor(obs, device = "cuda", dtype = torch.float32)
+			dist = self.agent.actor(obs_t)
 			action = dist.rsample()
 
-			q1, q2 = self.critic(obs, action)
+			q1, q2 = self.agent.critic(obs_t.unsqueeze(0), action.unsqueeze(0))
 
-			q_mean = torch.mean(q1,q2)
+			q_mean = torch.mean(q1+q2)
 			# q_max = torch.max(q1,q2)
-		return q_mean
+		return q_mean if  self.step > self.num_seed_steps else 0
 
 	
-	def update(self, achieved_goals, qs):
+	def update(self, step, achieved_goals, qs):
 		
 		
 		#achieved pool has the whole trajectory throughtout the episode, while achieved_pool_init_state has the initial state where it started the episode
 		# achieved_pool, achieved_pool_init_state = self.achieved_trajectory_pool.pad() # dont care about pad, it receives the stored achieved trajectories
 		if not len(qs):
-			qs = np.zeros(101,)
-
+			qs = np.zeros((101,2))
+		self.step = step
 		achieved_goals = np.array([self.eval_env.convert_obs_to_dict(achieved_goals[i])["achieved_goal"] for i in range(len(achieved_goals))])
 		achieved_values= self.generate_achieved_value(self.init_goal,achieved_goals)
-		rewards = self.gamma * achieved_values + (1-self.gamma) * qs
+		qs = np.mean(qs, axis=1)
+
+		rewards = self.gamma * achieved_values + (1-self.gamma) * qs # either get the qs earlier than 2000 steps or remove gamma limitation before then
 		rtgs = self.reward_to_rtg(rewards)
-		qs = np.mean(qs, axis=0)
 		# qs = np.min(qs, axis = 1)
 
-		self.train(achieved_goals, rtgs)		
+		self.train_single_trajectory(achieved_goals, rtgs)		
 		self.latest_achieved = achieved_goals
+		self.latest_rtgs = rtgs
 		self.max_achieved_reward = max(rtgs)
 		
 	def train(self, achieved_goals, rtgs):
@@ -168,7 +176,7 @@ class DTSampler:
 		if type(rtgs) != torch.tensor:
 			rtgs = torch.tensor(rtgs, device="cuda", dtype=torch.float32)
 		actions = torch.zeros((100,2), device="cuda",dtype=torch.float32 )
-		timesteps = torch.arange(0,100, device="cuda")
+		timesteps = torch.arange(0,100, device="cuda", dtype=torch.float32)
 		for i in range(1,len(achieved_goals)):
 			temp_actions = actions[:i].clone()
 			temp_timesteps = timesteps[:i].clone()
@@ -180,7 +188,7 @@ class DTSampler:
 				init_goal_pair = goal_concat(achieved_goals[0], goal)
 				aim_val = self.agent.aim_discriminator(init_goal_pair)
 				q_val = self.get_q_value(goal)
-				goal_val = self.gamma * aim_val + q_val * (1-self.gamma)
+				goal_val = self.gamma * aim_val + q_val * (self.beta)
 				loss = torch.nn.L1Loss(goal_val,temp_rtg[0])
 
 				self.state_optimizer.zero_grad()
@@ -192,9 +200,55 @@ class DTSampler:
 		#TODO just generate a simple training
 		#TODO loop over all achieved_goals and predict on varying length of episodes
 
+	def train_single_trajectory(self, achieved_goals, rtgs):
+		# Ensure input tensors are on the correct device and type
+		achieved_goals = torch.tensor([achieved_goals], device="cuda", dtype=torch.float32)
+		rtgs = torch.tensor([rtgs], device="cuda", dtype=torch.float32)
+
+		# Placeholder for actions and sequence of timesteps
+		actions = torch.zeros((1, achieved_goals.size(1), 2), device="cuda", dtype=torch.float32)
+		timesteps = torch.arange(achieved_goals.size(1), device="cuda").unsqueeze(0)  # Adding batch dimension
+
+
+		# Iterate over each state in the trajectory except the last one
+		for i in range(1, achieved_goals.shape[1]):
+			# Isolate the sub-sequence up to the current step
+			temp_achieved = achieved_goals[:,:i]
+			temp_actions = actions[:,:i]
+			temp_timesteps = timesteps[:,:i]
+			temp_rtg = rtgs[:,:i]
+			temp_rtg = temp_rtg.unsqueeze(-1) 
+			# attention_mask = torch.cat([torch.ones(i, device="cuda"), torch.zeros(achieved_goals.shape[1] - i, device="cuda")], dim=0).bool().unsqueeze(0)
+
+			# Forward pass to predict the next goal
+			# Assuming the last state's output (new goal) is what you want to compare against
+			predicted_goal, _, _  = self.dt.forward(temp_achieved, temp_actions, None, temp_rtg, temp_timesteps)#, attention_mask=attention_mask)
+			predicted_goal = predicted_goal[0,-1]
+			# Calculate the difference in RTG to simulate the value difference locations
+			# Assuming each step predicts a goal for the next state
+			if i < achieved_goals.shape[1] - 1:
+				expected_rtg_difference = rtgs[0,i] - rtgs[0,i + 1]  # Calculate the expected RTG difference
+				init_goal_pair = goal_concat_t(achieved_goals[0,0], predicted_goal)
+				aim_val = self.agent.aim_discriminator(init_goal_pair)
+				q_val = self.get_q_value(predicted_goal)
+				goal_val = self.gamma * aim_val + q_val * (self.beta)				
+				# Calculate loss between expected RTG difference and predicted RTG
+				loss = torch.nn.L1Loss()(goal_val, expected_rtg_difference.unsqueeze(0))
+
+				# Optimization step
+				self.state_optimizer.zero_grad()
+				loss.backward()
+				torch.nn.utils.clip_grad_norm_(self.dt.parameters(), 0.25)
+				self.state_optimizer.step()
+
+		return loss.item()  # Return the last computed loss
+
 	def generate_goal(self,achieved_goals,rtgs):
-		actions = torch.zeros(len(achieved_goals))
-		timesteps = torch.arange(0,100)
+		actions = torch.zeros((1, achieved_goals.shape[0], 2), device="cuda", dtype=torch.float32)
+		timesteps = torch.arange(achieved_goals.shape[0], device="cuda").unsqueeze(0)  # Adding batch dimension
+		achieved_goals = torch.tensor([achieved_goals], device="cuda", dtype=torch.float32)
+
+		rtgs = torch.tensor([self.latest_rtgs], device = "cuda", dtype = torch.float32).unsqueeze(0)
 		desired_goal = self.dt.get_state(achieved_goals, actions, None, rtgs, timesteps)
 		return desired_goal
 

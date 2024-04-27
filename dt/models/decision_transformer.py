@@ -57,7 +57,7 @@ class DecisionTransformer(TrajectoryModel):
 
         if attention_mask is None:
             # attention mask for GPT: 1 if can be attended to, 0 if not
-            attention_mask = torch.ones((batch_size, seq_length), dtype=torch.long)
+            attention_mask = torch.ones((batch_size, seq_length), dtype=torch.long, device = "cuda")
 
         # embed each modality with a different head
         state_embeddings = self.embed_state(states)
@@ -78,9 +78,9 @@ class DecisionTransformer(TrajectoryModel):
         stacked_inputs = self.embed_ln(stacked_inputs)
 
         # to make the attention mask fit the stacked inputs, have to stack it as well
-        stacked_attention_mask = torch.stack(
-            (attention_mask, attention_mask, attention_mask), dim=1
-        ).permute(0, 2, 1).reshape(batch_size, 3*seq_length)
+        stacked_attention_mask = torch.stack((attention_mask, attention_mask, attention_mask), dim=1)
+        stacked_attention_mask = stacked_attention_mask.permute(0, 2, 1)
+        stacked_attention_mask = stacked_attention_mask.reshape(batch_size, 3*seq_length)
 
         # we feed in the input embeddings (not word indices as in NLP) to the model
         transformer_outputs = self.transformer(
