@@ -248,7 +248,7 @@ class Workspace(object):
         dt = dt.to(device=self.device)
 
 
-        self.dt_sampler = DTSampler(self.env, self.eval_env, agent = self.get_agent(), state_optimizer= optimizer, dt= dt)
+        self.dt_sampler = DTSampler(self.env, self.eval_env, agent = self.get_agent(), state_optimizer= optimizer, dt= dt, video_recorder=self.train_video_recorder)
 
     def init_env(self,cfg):
         cfg.max_episode_timesteps = max_episode_timesteps_dict[cfg.env]
@@ -607,8 +607,8 @@ class Workspace(object):
         hgg_start_time = time.time()
         hgg_sampler.update(initial_goals, desired_goals, replay_buffer = self.expl_buffer, meta_nml_epoch=episode) # dont think about initial_goals, they are not used
         # print('hgg sampler update step : {} time : {}'.format(self.step, time.time() - hgg_start_time))
-    def dt_sampler_update(self,step, episode_observes, qs):
-        self.dt_sampler.update(step, episode_observes, qs)
+    def dt_sampler_update(self,step, episode, episode_observes, qs):
+        self.dt_sampler.update(step, episode, episode_observes, qs)
 
     def _run(self):        
         episode, episode_reward, episode_step, start_time, recent_sampled_goals, done, info, current_pocket_success, current_pocket_trial = self.run_init()
@@ -708,7 +708,7 @@ class Workspace(object):
                 
             if last_timestep:
                 self.last_timestep_save(episode_observes, replay_buffer)
-                self.dt_sampler_update(self.step, episode_observes, qs)
+                self.dt_sampler_update(self.step, episode, episode_observes, qs)
                 
                     
                     
