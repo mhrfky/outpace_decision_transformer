@@ -69,6 +69,7 @@ class DTSampler:
 
 		self.gamma = gamma
 		self.beta = beta
+		self.sigma = 1
 
 		self.device = device
 		self.num_seed_steps = 2000	 # TODO init this from config later
@@ -88,7 +89,7 @@ class DTSampler:
 		self.init_goal = self.eval_env.convert_obs_to_dict(self.eval_env.reset())['achieved_goal'].copy()
 		
 				
-
+		self.final_goal = np.array([0,8]) #TODO make this parametrized
 		self.latest_achieved = None
 		self.dt = dt
 		self.loss_fn = loss_fn
@@ -154,7 +155,20 @@ class DTSampler:
 			# q_mean = torch.mean(q1+q2)
 			# q_max = torch.max(q1,q2)
 		return q_min if  self.step > self.num_seed_steps else torch.tensor([0], device = "cuda", dtype=torch.float32)
+	def calculate_exploration_value(self, init_pos, curr_pos):
+		epsilon = 1e-10  # Small value to prevent division by zero
+		if type(init_pos) is torch.Tensor:
+			numerator = torch.linalg.norm(curr_pos - init_pos)
+			denominator = torch.linalg.norm(torch.tensor(self.final_goal, device= "cuda") - curr_pos) + epsilon
+			value = torch.exp(numerator) / torch.exp(denominator)
 
+			return value			
+		else:
+			numerator = np.linalg.norm(curr_pos - init_pos)
+			denominator = np.linalg.norm(self.final_goal - curr_pos) + epsilon
+			value = np.exp(numerator) / np.exp(denominator)
+
+			return value
 	
 	def update(self, step, episode, achieved_goals, qs):
 		
@@ -166,10 +180,10 @@ class DTSampler:
 		self.step = step
 		self.episode = episode
 		achieved_goals = np.array([self.eval_env.convert_obs_to_dict(achieved_goals[i])["achieved_goal"] for i in range(len(achieved_goals))])
-		achieved_values= self.generate_achieved_values(self.init_goal,achieved_goals)
+		achieved_values= self.generate_achieved_values(achieved_goals[0],achieved_goals)
 		qs = np.mean(qs, axis=1)
-
-		rewards = self.gamma * achieved_values + self.beta * qs # either get the qs earlier than 2000 steps or remove gamma limitation before then
+		exploration_vals = np.array([self.calculate_exploration_value(achieved_goals[0],achieved_goals[i]) for i in range(len(achieved_goals))])
+		rewards = self.gamma * achieved_values + self.beta * qs + self.sigma * exploration_vals# either get the qs earlier than 2000 steps or remove gamma limitation before then
 		rtgs = self.reward_to_rtg(rewards)
 		# qs = np.min(qs, axis = 1)
 
@@ -178,6 +192,8 @@ class DTSampler:
 		self.latest_rtgs = rtgs
 		self.max_achieved_reward = max(rtgs)
 		
+
+
 
 	def train_single_trajectory(self, achieved_goals, rtgs):
 		# Ensure input tensors are on the correct device and type
@@ -210,7 +226,8 @@ class DTSampler:
 				init_goal_pair = goal_concat_t(achieved_goals[0,0], predicted_goal)
 				aim_val = self.agent.aim_discriminator(init_goal_pair)
 				q_val = self.get_q_value(predicted_goal)
-				goal_val = self.gamma * aim_val + q_val * (self.beta)	
+				exploration_val = self.calculate_exploration_value(achieved_goals[0],predicted_goal)
+				goal_val = self.gamma * aim_val + q_val * (self.beta) + self.sigma * exploration_val
 
 				# Calculate loss between expected RTG difference and predicted RTG
 				loss = torch.nn.L1Loss()(goal_val, expected_rtg_difference.unsqueeze(0))
@@ -239,13 +256,14 @@ class DTSampler:
 
 	def visualize_value_heatmaps_for_debug(self):
 		assert self.video_recorder is not None
-		fig, axs = plt.subplots(1, 2, figsize=(16, 6))  # 1 row, 2 columns of subplots
+		fig, axs = plt.subplots(2, 2, figsize=(16, 6))  # 1 row, 2 columns of subplots
 
 		# Visualize Q values
-		self.visualize_q_values(axs[0])
+		self.visualize_q_values(axs[0][0])
 
 		# Visualize Aim values
-		self.visualize_aim_values(axs[1])
+		self.visualize_aim_values(axs[1][0])
+		self.visualize_exploration_values(axs[0][1])
 
 		plt.savefig(self.video_recorder.debug_dir + '/combined_heatmaps_episode_' + str(self.episode) + '.jpg')
 		plt.close(fig)
@@ -270,6 +288,16 @@ class DTSampler:
 				pos = torch.tensor([x, y], device=self.device)
 				q_val_t = self.get_q_value(pos)
 				data_points.append([x, y, q_val_t.detach().cpu().numpy()])
+		data_points = np.array(data_points)
+		self.plot_heatmap(data_points, ax, 'Q Values Heatmap')
+
+	def visualize_exploration_values(self, ax):
+		data_points = []
+		for x in range(self.limits[0][0], self.limits[0][1]):
+			for y in range(self.limits[1][0], self.limits[1][1]):
+				pos = [x,y]
+				exploration_val = self.calculate_exploration_value(self.init_goal, pos)
+				data_points.append([x, y, exploration_val])
 		data_points = np.array(data_points)
 		self.plot_heatmap(data_points, ax, 'Q Values Heatmap')
 

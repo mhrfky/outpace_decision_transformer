@@ -624,10 +624,10 @@ class Workspace(object):
                     if info['is_success']:
                         current_pocket_success += 1 
                     
-                    # hgg update
-                    if self.cfg.use_hgg :
-                        if episode % self.cfg.hgg_kwargs.hgg_sampler_update_frequency ==0 :                            
-                            self.hgg_update(episode)
+                    # # hgg update
+                    # if self.cfg.use_hgg :
+                    #     if episode % self.cfg.hgg_kwargs.hgg_sampler_update_frequency ==0 :                            
+                    #         self.hgg_update(episode)
                 
 
 
