@@ -67,8 +67,8 @@ class DTSampler:
 		self.state_optimizer = state_optimizer
 		self.critic = critic
 
-		self.gamma = gamma
-		self.beta = beta
+		self.gamma = -1
+		self.beta = -1
 		self.sigma = 1
 
 		self.device = device
@@ -97,6 +97,7 @@ class DTSampler:
 		self.return_to_add = 0.05
 		self.discount_rate = 0.99 #TODO add this as init value
 		self.limits = [[-2,8],[-2,8], [0,0]] # TODO make this generic
+		self.latest_desired_goal = self.final_goal
 	def reward_to_rtg(self,rewards):
 		rtg = discount_cumsum(rewards, self.discount_rate)
 
@@ -109,7 +110,10 @@ class DTSampler:
 			if self.latest_achieved is None:
 				return np.array([0,8])
 			goal_t =  self.generate_goal(self.latest_achieved,[self.max_achieved_reward + self.return_to_add])
-			return goal_t.detach().cpu().numpy()
+			goal =  goal_t.detach().cpu().numpy()
+			self.latest_desired_goal = goal
+
+			return goal
 		else:
 			pass # TODO work on the episode observes, instead of residual walking this might be better to implement
 
@@ -154,21 +158,38 @@ class DTSampler:
 			q_min = torch.min(q1,q2)
 			# q_mean = torch.mean(q1+q2)
 			# q_max = torch.max(q1,q2)
-		return q_min if  self.step > self.num_seed_steps else torch.tensor([0], device = "cuda", dtype=torch.float32)
+		return q_min if  self.step > self.num_seed_steps else torch.tensor([0], device = "cuda", dtype=torch.float32) #TODO zero is no go, either average the other rewards or pull the calculation of q_vals to start
 	def calculate_exploration_value(self, init_pos, curr_pos):
 		epsilon = 1e-10  # Small value to prevent division by zero
 		if type(init_pos) is torch.Tensor:
 			numerator = torch.linalg.norm(curr_pos - init_pos)
 			denominator = torch.linalg.norm(torch.tensor(self.final_goal, device= "cuda") - curr_pos) + epsilon
-			value = torch.exp(numerator) / torch.exp(denominator)
+			value = torch.log(numerator + epsilon) - torch.log(denominator)
 
+			# value = numerator / denominator
 			return value			
 		else:
 			numerator = np.linalg.norm(curr_pos - init_pos)
 			denominator = np.linalg.norm(self.final_goal - curr_pos) + epsilon
-			value = np.exp(numerator) / np.exp(denominator)
+			value = np.log(numerator + epsilon) - np.log(denominator)
 
+			# value = numerator / denominator
 			return value
+	def normalize_array(self,array):
+		# Shift min to 0 by subtracting the minimum value
+		shifted_array = array - np.min(array)
+		
+		# Scale to the range [0, 1]
+		max_value = np.max(shifted_array)
+		if max_value > 0:  # Avoid division by zero
+			normalized_0_1 = shifted_array / max_value
+		else:
+			normalized_0_1 = shifted_array  # If max is 0, all values are zero
+		
+		# Scale to [-1, 1]
+		normalized_minus1_1 = 2 * normalized_0_1 - 1
+		
+		return normalized_minus1_1
 	
 	def update(self, step, episode, achieved_goals, qs):
 		
@@ -181,15 +202,20 @@ class DTSampler:
 		self.episode = episode
 		achieved_goals = np.array([self.eval_env.convert_obs_to_dict(achieved_goals[i])["achieved_goal"] for i in range(len(achieved_goals))])
 		achieved_values= self.generate_achieved_values(achieved_goals[0],achieved_goals)
-		qs = np.mean(qs, axis=1)
 		exploration_vals = np.array([self.calculate_exploration_value(achieved_goals[0],achieved_goals[i]) for i in range(len(achieved_goals))])
+
+		qs = self.normalize_array(qs)
+		qs = np.min(qs, axis= 1)
+		achieved_values = self.normalize_array(achieved_values)
+		# exploration_vals = self.normalize_array(exploration_vals)
+		
 		rewards = self.gamma * achieved_values + self.beta * qs + self.sigma * exploration_vals# either get the qs earlier than 2000 steps or remove gamma limitation before then
 		rtgs = self.reward_to_rtg(rewards)
 		# qs = np.min(qs, axis = 1)
-
-		self.train_single_trajectory(achieved_goals, rtgs)		
 		self.latest_achieved = achieved_goals
 		self.latest_rtgs = rtgs
+
+		self.train_single_trajectory(achieved_goals, rtgs)		
 		self.max_achieved_reward = max(rtgs)
 		
 
@@ -256,20 +282,43 @@ class DTSampler:
 
 	def visualize_value_heatmaps_for_debug(self):
 		assert self.video_recorder is not None
-		fig, axs = plt.subplots(2, 2, figsize=(16, 6))  # 1 row, 2 columns of subplots
+		fig_shape = (3,2)
+		fig, axs = plt.subplots(fig_shape[0],fig_shape[1], figsize=(16, 6))  # 1 row, 2 columns of subplots
 
-		# Visualize Q values
-		self.visualize_q_values(axs[0][0])
+		plot_dict = {}
+		plot_dict["Combined Heatmap"] = self.create_combined_np()
+		plot_dict["Q Heatmap"]  = self.visualize_q_values(plot_dict["Combined Heatmap"])
+		plot_dict["Aim Heatmap"]  = self.visualize_aim_values(plot_dict["Combined Heatmap"])
+		plot_dict["Explore Heatmap"]  = self.visualize_exploration_values(plot_dict["Combined Heatmap"])
 
-		# Visualize Aim values
-		self.visualize_aim_values(axs[1][0])
-		self.visualize_exploration_values(axs[0][1])
+
+		for i,key in enumerate(plot_dict.keys()):
+			
+			pos = (i // fig_shape[1],i % fig_shape[1])
+			self.plot_heatmap(plot_dict[key],axs[pos[0]][pos[1]],key)
+		
+
+		i +=1 
+		pos = (i // fig_shape[1],i % fig_shape[1])
+		self.visualize_trajectories_on_time(axs[pos[0]][pos[1]])
+
+		i +=1 
+		pos = (i // fig_shape[1],i % fig_shape[1])
+		self.visualize_trajectories_on_rtgs(axs[pos[0]][pos[1]])
 
 		plt.savefig(self.video_recorder.debug_dir + '/combined_heatmaps_episode_' + str(self.episode) + '.jpg')
 		plt.close(fig)
 
-	def visualize_aim_values(self, ax):
+	def create_combined_np(self):
 		data_points = []
+		for x in range(self.limits[0][0], self.limits[0][1]):
+			for y in range(self.limits[1][0], self.limits[1][1]):
+				data_points.append([x, y, 0])
+		return np.array(data_points)
+	
+	def visualize_aim_values(self, combined):
+		data_points = []
+		i = 0
 		for x in range(self.limits[0][0], self.limits[0][1]):
 			for y in range(self.limits[1][0], self.limits[1][1]):
 				pos = np.array([x, y])
@@ -277,29 +326,45 @@ class DTSampler:
 				with torch.no_grad():
 					obs_t = torch.from_numpy(np.stack(obs, axis=0)).float().to(self.device)
 					aim_val = -self.agent.aim_discriminator(obs_t).detach().cpu().numpy()[:, 0]
-				data_points.append([x, y, aim_val])
+				data_points.append([x, y, self.gamma * aim_val])
+				combined[i,2] += self.gamma * aim_val
+				i+= 1
 		data_points = np.array(data_points)
-		self.plot_heatmap(data_points, ax, 'Aim Values Heatmap')
+		data_points[:,2] = self.normalize_array(data_points[:,2])
+		return data_points
 
-	def visualize_q_values(self, ax):
+	def visualize_q_values(self, combined):
 		data_points = []
+		i = 0
+
 		for x in range(self.limits[0][0], self.limits[0][1]):
 			for y in range(self.limits[1][0], self.limits[1][1]):
 				pos = torch.tensor([x, y], device=self.device)
 				q_val_t = self.get_q_value(pos)
-				data_points.append([x, y, q_val_t.detach().cpu().numpy()])
+				q_val = q_val_t.detach().cpu().numpy()
+				data_points.append([x, y, self.beta *q_val])
+				combined[i,2] += self.beta * q_val
+				i+= 1
 		data_points = np.array(data_points)
-		self.plot_heatmap(data_points, ax, 'Q Values Heatmap')
+		data_points[:,2] = self.normalize_array(data_points[:,2])
+		return data_points
 
-	def visualize_exploration_values(self, ax):
+
+	def visualize_exploration_values(self, combined):
 		data_points = []
+		i = 0
+
 		for x in range(self.limits[0][0], self.limits[0][1]):
 			for y in range(self.limits[1][0], self.limits[1][1]):
 				pos = [x,y]
 				exploration_val = self.calculate_exploration_value(self.init_goal, pos)
 				data_points.append([x, y, exploration_val])
+				combined[i,2] += self.sigma * exploration_val
+				i+= 1
 		data_points = np.array(data_points)
-		self.plot_heatmap(data_points, ax, 'Q Values Heatmap')
+		data_points[:,2] = self.normalize_array(data_points[:,2])
+		return data_points
+
 
 	def plot_heatmap(self, data_points, ax, title):
 		x = data_points[:, 0]
@@ -309,13 +374,48 @@ class DTSampler:
 		grid_values = griddata((x, y), values, (grid_x, grid_y), method='cubic')
 		im = ax.imshow(grid_values.T, extent=(min(x), max(x), min(y), max(y)), origin='lower', cmap='viridis')
 		ax.figure.colorbar(im, ax=ax, label='Value')
-		# ax.scatter(x, y, c='red', s=50)  # Red dots on the original data points
 		ax.set_title(title)
 		ax.set_xlabel('X coordinate')
 		ax.set_ylabel('Y coordinate')
+		ax.set_xlim(-2, 8)
+		ax.set_ylim(-2, 8)
+		ax.set_aspect('equal')  # Ensuring equal aspect ratio
 		ax.grid(True)
 
+	def visualize_trajectories_on_time(self, ax, title='Position Over Time'):
+		x = self.latest_achieved[:, 0]
+		y = self.latest_achieved[:, 1]
+		t = np.arange(0, len(x))
 
-				
-	def visualize_total_values():
-		pass
+		t_normalized = (t - t.min()) / (t.max() - t.min())
+		scatter = ax.scatter(x, y, c=t_normalized, cmap='viridis', edgecolor='k')
+		ax.scatter(self.latest_desired_goal[0], self.latest_desired_goal[1], color='red', marker='x', s=100, label='Latest Desired Goal')
+
+		cbar = ax.figure.colorbar(scatter, ax=ax, label='Time step')
+
+		ax.set_xlabel('X Position')
+		ax.set_ylabel('Y Position')
+		ax.set_title(title)
+		ax.set_xlim(-5, 10)
+		ax.set_ylim(-5, 10)
+		ax.set_aspect('equal')  # Ensuring equal aspect ratio
+		ax.grid(True)
+	def visualize_trajectories_on_rtgs(self, ax, title='Position Over RTGs'):
+		x = self.latest_achieved[:, 0]
+		y = self.latest_achieved[:, 1]
+		rtgs = self.latest_rtgs
+
+		# Normalize time values to [0, 1] for color mapping
+		# t_normalized = (t - t.min()) / (t.max() - t.min())
+		scatter = ax.scatter(x, y, c=rtgs, cmap='viridis', edgecolor='k')
+		ax.scatter(self.latest_desired_goal[0], self.latest_desired_goal[1], color='red', marker='x', s=100, label='Latest Desired Goal')
+
+		cbar = ax.figure.colorbar(scatter, ax=ax, label='Time step')
+
+		ax.set_xlabel('X Position')
+		ax.set_ylabel('Y Position')
+		ax.set_title(title)
+		ax.set_xlim(-5, 10)
+		ax.set_ylim(-5, 10)
+		ax.set_aspect('equal')  # Ensuring equal aspect ratio
+		ax.grid(True)

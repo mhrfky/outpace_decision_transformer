@@ -982,16 +982,16 @@ class Workspace(object):
                                                     device = self.device, 
                                                     savedir_w_name = self.train_video_recorder.save_dir + '/aim_f_visualize_train_goalfix_'+str(episode)+'_s'+str(k),
                                                     )
-                if self.cfg.use_meta_nml:
-                    visualize_meta_nml(agent=agent, 
-                                               meta_nml_epoch=episode, 
-                                               scatter_states = scatter_states.squeeze(),
-                                               replay_buffer= self.get_buffer(), 
-                                               goal_env = self.env,
-                                               env_name = self.cfg.env, 
-                                               aim_input_type = self.cfg.aim_kwargs.aim_input_type, 
-                                               savedir_w_name = self.train_video_recorder.save_dir + '/aim_meta_nml_prob_visualize_train_episode_'+str(episode)+'_s'+str(k),
-                                               )
+                # if self.cfg.use_meta_nml:
+                #     visualize_meta_nml(agent=agent, 
+                #                                meta_nml_epoch=episode, 
+                #                                scatter_states = scatter_states.squeeze(),
+                #                                replay_buffer= self.get_buffer(), 
+                #                                goal_env = self.env,
+                #                                env_name = self.cfg.env, 
+                #                                aim_input_type = self.cfg.aim_kwargs.aim_input_type, 
+                #                                savedir_w_name = self.train_video_recorder.save_dir + '/aim_meta_nml_prob_visualize_train_episode_'+str(episode)+'_s'+str(k),
+                #                                )
 
     def hgg_sample(self, recent_sampled_goals):
         obs = None

@@ -552,36 +552,10 @@ class OUTPACEAgent(object):
             
         candidate_goal = np.tile(ag, (num_candidate,1)) + noise
         
-        if uncertainty_mode == 'nml' and self.use_meta_nml:
-            start = time.time()
-            classification_probabilities = self.get_prob_by_meta_nml(candidate_goal, episode, replay_buffer=replay_buffer, goal_env=env)
-            # print('get prob by meta nml time in sample_randomwalk_goals : ', time.time() - start)
-
-            satisfied = False
-            epsilon = 0
-            while not satisfied:                
-                lb = 0.4-epsilon                
-                if lb <0:
-                    warnings.warn('meta_nml uncertainty threshold is out of range!!')
-                
-                uncertain_indices = np.where(((classification_probabilities>=0.4-epsilon))==1)[0]
-                if uncertain_indices.shape[0]==0:
-                    epsilon +=0.02
-                else:
-                    satisfied = True
-        
-            prob = F.softmax(torch.from_numpy(classification_probabilities[uncertain_indices]/self.meta_nml_temperature).float().to(self.device), dim = 0)
-            dist = torch.distributions.Categorical(probs=prob)
-            idxs = dist.sample((1,)).detach().cpu().numpy()
-            
-
-            obs = candidate_goal[uncertain_indices[idxs]]
-            
-        elif uncertainty_mode == 'f':
-            aim_obs = np.tile(obs, (candidate_goal.shape[0], 1))
-            aim_obs[:, -env.goal_dim:] = candidate_goal
-            indices = self.sample_idx_by_aim_outputs(torch.as_tensor(aim_obs, device=self.device).float(), env, 1, topk=aim_obs.shape[0])
-            obs = aim_obs[indices][-env.goal_dim:]
+        aim_obs = np.tile(obs, (candidate_goal.shape[0], 1))
+        aim_obs[:, -env.goal_dim:] = candidate_goal
+        indices = self.sample_idx_by_aim_outputs(torch.as_tensor(aim_obs, device=self.device).float(), env, 1, topk=aim_obs.shape[0])
+        obs = aim_obs[indices][-env.goal_dim:]
 
         
         return np.squeeze(obs)
