@@ -287,9 +287,9 @@ class DTSampler:
 
 		plot_dict = {}
 		plot_dict["Combined Heatmap"] = self.create_combined_np()
-		plot_dict["Q Heatmap"]  = self.visualize_q_values(plot_dict["Combined Heatmap"])
-		plot_dict["Aim Heatmap"]  = self.visualize_aim_values(plot_dict["Combined Heatmap"])
-		plot_dict["Explore Heatmap"]  = self.visualize_exploration_values(plot_dict["Combined Heatmap"])
+		plot_dict["Q Heatmap"]  = self.generate_q_values_for_heatmap(plot_dict["Combined Heatmap"])
+		plot_dict["Aim Heatmap"]  = self.generate_aim_values_for_heatmap(plot_dict["Combined Heatmap"])
+		plot_dict["Explore Heatmap"]  = self.generate_exploration_values_for_heatmap(plot_dict["Combined Heatmap"])
 
 
 		for i,key in enumerate(plot_dict.keys()):
@@ -316,7 +316,7 @@ class DTSampler:
 				data_points.append([x, y, 0])
 		return np.array(data_points)
 	
-	def visualize_aim_values(self, combined):
+	def generate_aim_values_for_heatmap(self, combined):
 		data_points = []
 		i = 0
 		for x in range(self.limits[0][0], self.limits[0][1]):
@@ -333,7 +333,7 @@ class DTSampler:
 		data_points[:,2] = self.normalize_array(data_points[:,2])
 		return data_points
 
-	def visualize_q_values(self, combined):
+	def generate_q_values_for_heatmap(self, combined):
 		data_points = []
 		i = 0
 
@@ -350,7 +350,7 @@ class DTSampler:
 		return data_points
 
 
-	def visualize_exploration_values(self, combined):
+	def generate_exploration_values_for_heatmap(self, combined):
 		data_points = []
 		i = 0
 
