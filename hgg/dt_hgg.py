@@ -95,11 +95,12 @@ class DTSampler:
 		self.loss_fn = loss_fn
 		self.max_achieved_reward = 0
 		self.return_to_add = 0.05
-		self.discount_rate = 0.99 #TODO add this as init value
+		self.discount_rate = 1# 0.99 #TODO add this as init value
 		self.limits = [[-2,8],[-2,8], [0,0]] # TODO make this generic
 		self.latest_desired_goal = self.final_goal
 	def reward_to_rtg(self,rewards):
-		rtg = discount_cumsum(rewards, self.discount_rate)
+		rtg = rewards - rewards[-1]
+		# rtg = discount_cumsum(rewards, self.discount_rate)
 
 		return rtg #TODO check if it is working properly
 
@@ -212,12 +213,20 @@ class DTSampler:
 		rewards = self.gamma * achieved_values + self.beta * qs + self.sigma * exploration_vals# either get the qs earlier than 2000 steps or remove gamma limitation before then
 		rtgs = self.reward_to_rtg(rewards)
 		# qs = np.min(qs, axis = 1)
+
+		achieved_goals, rtgs = self.shorten_trajectory(achieved_goals, rtgs)
+
 		self.latest_achieved = achieved_goals
 		self.latest_rtgs = rtgs
-
+		
 		self.train_single_trajectory(achieved_goals, rtgs)		
 		self.max_achieved_reward = max(rtgs)
 		
+	def shorten_trajectory(self, achieved_goals, rtgs):
+		achieved_goals = achieved_goals[::3]# list of reduced ts		)
+		rtgs = rtgs[::3]
+  
+		return achieved_goals, rtgs
 
 
 
@@ -237,34 +246,37 @@ class DTSampler:
 			temp_achieved = achieved_goals[:,:i]
 			temp_actions = actions[:,:i]
 			temp_timesteps = timesteps[:,:i]
-			temp_rtg = rtgs[:,:i]
-			temp_rtg = temp_rtg.unsqueeze(-1) 
-			# attention_mask = torch.cat([torch.ones(i, device="cuda"), torch.zeros(achieved_goals.shape[1] - i, device="cuda")], dim=0).bool().unsqueeze(0)
+			for j in range(i+1,achieved_goals.shape[1]):
+				temp_rtg = rtgs[:,:i].clone()
+				temp_rtg -= rtgs[0,j]
+				temp_rtg = temp_rtg.unsqueeze(-1) 	
+				# temp_rtg = rtgs[:,:i].clone()
+				# temp_rtg = temp_rtg.unsqueeze(-1) 
 
-			# Forward pass to predict the next goal
-			# Assuming the last state's output (new goal) is what you want to compare against
-			predicted_goal, _, _  = self.dt.forward(temp_achieved, temp_actions, None, temp_rtg, temp_timesteps)#, attention_mask=attention_mask)
-			predicted_goal = predicted_goal[0,-1]
-			# Calculate the difference in RTG to simulate the value difference locations
-			# Assuming each step predicts a goal for the next state
-			if i < achieved_goals.shape[1] - 1:
-				expected_rtg_difference = rtgs[0,i] - rtgs[0,i + 1]  # Calculate the expected RTG difference
-				init_goal_pair = goal_concat_t(achieved_goals[0,0], predicted_goal)
-				aim_val = self.agent.aim_discriminator(init_goal_pair)
-				q_val = self.get_q_value(predicted_goal)
-				exploration_val = self.calculate_exploration_value(achieved_goals[0],predicted_goal)
-				goal_val = self.gamma * aim_val + q_val * (self.beta) + self.sigma * exploration_val
+				# Forward pass to predict the next goal
+				# Assuming the last state's output (new goal) is what you want to compare against
+				predicted_goal, _, _  = self.dt.forward(temp_achieved, temp_actions, None, temp_rtg, temp_timesteps)#, attention_mask=attention_mask)
+				predicted_goal = predicted_goal[0,-1]
+				# Calculate the difference in RTG to simulate the value difference locations
+				# Assuming each step predicts a goal for the next state
+				if i < achieved_goals.shape[1] - 1:
+					expected_rtg_difference = temp_rtg[0,0,0]  # Calculate the expected RTG difference
+					init_goal_pair = goal_concat_t(achieved_goals[0,0], predicted_goal)
+					aim_val = self.agent.aim_discriminator(init_goal_pair)
+					q_val = self.get_q_value(predicted_goal)
+					exploration_val = self.calculate_exploration_value(achieved_goals[0],predicted_goal)
+					goal_val = self.gamma * aim_val + q_val * (self.beta) + self.sigma * exploration_val
 
-				# Calculate loss between expected RTG difference and predicted RTG
-				loss = torch.nn.L1Loss()(goal_val, expected_rtg_difference.unsqueeze(0))
+					# Calculate loss between expected RTG difference and predicted RTG
+					loss = torch.nn.L1Loss()(goal_val, expected_rtg_difference.unsqueeze(0))
 
-				# loss = torch.nn.MSELoss()(torch.tensor([0,8], device = "cuda", dtype= torch.float32), predicted_goal) # it can overfit just fine
-				
-				# Optimization step
-				self.state_optimizer.zero_grad()
-				loss.backward()
-				torch.nn.utils.clip_grad_norm_(self.dt.parameters(), 0.25)
-				self.state_optimizer.step()
+					# loss = torch.nn.MSELoss()(torch.tensor([0,8], device = "cuda", dtype= torch.float32), predicted_goal) # it can overfit just fine
+					
+					# Optimization step
+					self.state_optimizer.zero_grad()
+					loss.backward()
+					torch.nn.utils.clip_grad_norm_(self.dt.parameters(), 0.25)
+					self.state_optimizer.step()
 		self.visualize_value_heatmaps_for_debug()
 
 		return loss.item()  # Return the last computed loss
