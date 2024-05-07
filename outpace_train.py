@@ -614,7 +614,7 @@ class Workspace(object):
         episode, episode_reward, episode_step, start_time, recent_sampled_goals, done, info, current_pocket_success, current_pocket_trial = self.run_init()
         agent = self.get_agent()
         first_iteration = True
-        qs = np.array([])
+        qs = [[0,0]]
 
         while self.step <= self.cfg.num_train_steps:
             
@@ -683,7 +683,8 @@ class Workspace(object):
             action = self.get_agent_act(obs)
             logging_dict = agent.update(replay_buffer, self.randomwalk_buffer, self.aim_expl_buffer, self.step, self.env, self.goal_buffer)
             
-            np.append(qs,[logging_dict.get('q1',0),logging_dict.get('q2',0)])
+
+            qs.append([logging_dict.get('q1', 0), logging_dict.get('q2', 0)])         
             if self.step % self.cfg.logging_frequency== 0:                
                 if logging_dict is not None: # when step = 0                                        
                     for key, val in logging_dict.items():
@@ -708,7 +709,10 @@ class Workspace(object):
                 
             if last_timestep:
                 self.last_timestep_save(episode_observes, replay_buffer)
+                qs = np.array(qs)
                 self.dt_sampler_update(self.step, episode, episode_observes, qs)
+                qs = [[0,0]]
+
                 
                     
                     
