@@ -615,7 +615,7 @@ class Workspace(object):
         agent = self.get_agent()
         first_iteration = True
         qs = [[0,0]]
-
+        
         while self.step <= self.cfg.num_train_steps:
             
             if done:
@@ -643,6 +643,7 @@ class Workspace(object):
                 
                 # obs = self.hgg_sample(recent_sampled_goals)
                 obs = self.dt_sample(recent_sampled_goals)
+                residual_goals_observes = []
                 final_goal = self.env.goal.copy()                
                 
                     
@@ -726,10 +727,13 @@ class Workspace(object):
                 if self.env.is_residual_goal:
                     if (self.env.residual_goalstep % 10 == 0) or info.get('is_current_goal_success'):
                         if (self.cfg.use_uncertainty_for_randomwalk not in [None, 'none', 'None']) and self.step > self.get_agent().meta_test_sample_size:
-                            residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
+                            # residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
+                            residual_goal = self.get_residual_goal_with_dt(episode,episode_observes,qs)
+
                         else:
                             residual_goal = self.get_residual_goal_with_NML(obs)
-                            
+                            residual_goal = self.get_residual_goal_with_dt(episode,episode_observes,qs)
+                        
                         self.env.reset_goal(residual_goal)
                         obs[-self.env.goal_dim:] = residual_goal.copy()
                 else:
@@ -775,6 +779,8 @@ class Workspace(object):
                                 episode = episode, env=self.env, replay_buffer = self.get_inv_weight_curriculum_buffer(), \
                                 num_candidate = self.cfg.randomwalk_num_candidate, random_noise = self.cfg.randomwalk_random_noise, \
                                 uncertainty_mode = self.cfg.use_uncertainty_for_randomwalk)
+    def get_residual_goal_with_dt(self, episode, episode_observes,qs):
+        return self.dt_sampler.sample(episode_observes, qs)
 
     def last_timestep_save(self, episode_observes, replay_buffer):
         replay_buffer.add_trajectory(episode_observes)

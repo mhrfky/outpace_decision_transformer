@@ -19,11 +19,11 @@ def goal_concat(obs, goal):
 def goal_concat_t(obs, goal):
 	return torch.concatenate([obs, goal], axis=0)
 def discount_cumsum(x, gamma):
-    discount_cumsum = np.zeros_like(x)
-    discount_cumsum[-1] = x[-1]
-    for t in reversed(range(x.shape[0]-1)):
-        discount_cumsum[t] = x[t] + gamma * discount_cumsum[t+1]
-    return discount_cumsum
+	discount_cumsum = np.zeros_like(x)
+	discount_cumsum[-1] = x[-1]
+	for t in reversed(range(x.shape[0]-1)):
+		discount_cumsum[t] = x[t] + gamma * discount_cumsum[t+1]
+	return discount_cumsum
 class TrajectoryPool:
 	def __init__(self, pool_length):
 		self.length = pool_length
@@ -100,6 +100,7 @@ class DTSampler:
 		self.limits = [[-2,8],[-2,8], [0,0]] # TODO make this generic
 		self.latest_desired_goal = self.final_goal
 		self.max_rewards_so_far = []
+		self.residual_goals_debug = []
 	def reward_to_rtg(self,rewards):
 		return rewards - rewards[-1]
 
@@ -114,27 +115,13 @@ class DTSampler:
 		with torch.no_grad(): ## when using no_grad, no gradients will be calculated or stored for operations on tensors, which can reduce memory usage and speed up computations				
 			init_to_goal_pair_t  = torch.from_numpy(np.stack(init_to_goal_pair, axis =0)).float().to(self.device) #[ts, dim]				
 			goal_to_final_pair_t = torch.from_numpy(np.stack(goal_to_final_pair, axis =0)).float().to(self.device) #[ts, dim]				
-			values = -self.agent.aim_discriminator(init_to_goal_pair_t).detach().cpu().numpy()[:, 0] # TODO discover inside aim_discriminator,
+			values = +self.agent.aim_discriminator(goal_to_final_pair_t).detach().cpu().numpy()[:, 0] # TODO discover inside aim_discriminator,
 																							# 	* what kind of inputs it does require
 																							# 	* value can be interpreted as a measure of how desirable or advantageous the current state is from the perspective of achieving the final goal
 			# values += self.agent.aim_discriminator(goal_to_final_pair_t).detach().cpu().numpy()[:, 0] 
 				# value = np.clip(value, -1.0/(1.0-self.gamma), 0)
 		return values
-	
-	def normalize_achieved_value(self,achieved_value):
-		if 'aim_f' not in self.cost_type:
-			return
-		# print('normalize aim output in hgg update!')
-		# For considering different traj length
-		aim_outputs_max = -np.inf
-		aim_outputs_min = np.inf
-		for i in range(len(achieved_value)): # list of aim_output [ts,]
-			if achieved_value[i].max() > aim_outputs_max:
-				aim_outputs_max = achieved_value[i].max()
-			if achieved_value[i].min() < aim_outputs_min:
-				aim_outputs_min = achieved_value[i].min()
-		for i in range(len(achieved_value)):
-			achieved_value[i] = ((achieved_value[i]-aim_outputs_min)/(aim_outputs_max - aim_outputs_min+0.00001)-0.5)*2 #[0, 1] -> [-1,1]
+
 				
 	def get_q_values(self,goal_t):
 		goal = goal_t.detach().cpu().numpy()
@@ -200,23 +187,26 @@ class DTSampler:
 		achieved_values= self.generate_achieved_values(achieved_goals[0],achieved_goals)
 		exploration_vals = np.array([self.calculate_exploration_value(achieved_goals[0],achieved_goals[i]) for i in range(len(achieved_goals))])
 
-		qs = self.normalize_array(qs)
+		# qs = self.normalize_array(qs)
 		qs = np.min(qs, axis= 1)
 		# achieved_values = self.normalize_array(achieved_values)
 		exploration_vals = self.normalize_array(exploration_vals)
 		
 		rewards = self.gamma * achieved_values + self.beta * qs + self.sigma * exploration_vals# either get the qs earlier than 2000 steps or remove gamma limitation before then
+		rewards = self.normalize_array(rewards)
+
 		rtgs = self.reward_to_rtg(rewards)
 		# qs = np.min(qs, axis = 1)
 
-		achieved_goals, rtgs 	= self.shorten_trajectory(achieved_goals, rtgs)
+		# achieved_goals, rtgs 	= self.shorten_trajectory(achieved_goals, rtgs)
 
-		self.latest_achieved 	= achieved_goals
-		self.latest_rtgs 		= rtgs
+		self.latest_achieved 	= np.array([achieved_goals])
+		self.latest_rtgs 		= np.array([rtgs])
 		
 		self.train_single_trajectory(achieved_goals, rtgs)		
 		self.max_achieved_reward = max(rtgs)
 		self.max_rewards_so_far.append(self.max_achieved_reward)
+		self.residual_goals_debug = []
 		
 
 
@@ -231,70 +221,98 @@ class DTSampler:
 
 
 		# Iterate over each state in the trajectory except the last one
-		for i in range(1, achieved_goals.shape[1]):
+		for i in range(1, achieved_goals.shape[1]-1):
 			# Isolate the sub-sequence up to the current step
 			temp_achieved = achieved_goals[:,:i]
 			temp_actions = actions[:,:i]
 			temp_timesteps = timesteps[:,:i]
-			for j in range(i+1,achieved_goals.shape[1]):
-				temp_rtg = rtgs[:,:i].clone()
-				temp_rtg -= rtgs[0,j]
-				temp_rtg = temp_rtg.unsqueeze(-1) 	
-				# temp_rtg = rtgs[:,:i].clone()
-				# temp_rtg = temp_rtg.unsqueeze(-1) 
+			
+			temp_rtg = rtgs[:,:i].clone()
+			temp_rtg -= rtgs[0,i+1]
+			temp_rtg = temp_rtg.unsqueeze(-1) 	
+			# temp_rtg = rtgs[:,:i].clone()
+			# temp_rtg = temp_rtg.unsqueeze(-1) 
 
-				# Forward pass to predict the next goal
-				# Assuming the last state's output (new goal) is what you want to compare against
-				predicted_goal, _, _  	= self.dt.forward(temp_achieved, temp_actions, None, temp_rtg, temp_timesteps)#, attention_mask=attention_mask)
-				predicted_goal 			= predicted_goal[0,-1]
-				# Calculate the difference in RTG to simulate the value difference locations
-				# Assuming each step predicts a goal for the next state
-				if i < achieved_goals.shape[1] - 1:
-					expected_val 			= temp_rtg[0,0,0]  # Calculate the expected RTG difference
-     
-					init_goal_pair 			= goal_concat_t(achieved_goals[0,0], predicted_goal)
-					aim_val_t 				= self.agent.aim_discriminator(init_goal_pair)
-     
-					q1_t, q2_t				= self.get_q_values(predicted_goal)
-					q_val_t					= torch.min(q1_t,q2_t)
-     
-					exploration_val 		= self.calculate_exploration_value(achieved_goals[0],predicted_goal)
-     
-					goal_val 				= self.gamma * aim_val_t + q_val_t * (self.beta) + self.sigma * exploration_val
+			# Forward pass to predict the next goal
+			# Assuming the last state's output (new goal) is what you want to compare against
+			predicted_goal, _, _  	= self.dt.forward(temp_achieved, temp_actions, None, temp_rtg, temp_timesteps)#, attention_mask=attention_mask)
+			predicted_goal 			= predicted_goal[0,-1]
+			# Calculate the difference in RTG to simulate the value difference locations
+			# Assuming each step predicts a goal for the next state
+			if i < achieved_goals.shape[1] - 1:
+				expected_val 			= temp_rtg[0,0,0]  # Calculate the expected RTG difference
 
-					# Calculate loss between expected RTG difference and predicted RTG
-					loss = torch.nn.L1Loss()(goal_val, expected_val.unsqueeze(0))
-					
-					# loss = torch.nn.MSELoss()(torch.tensor([0,8], device = "cuda", dtype= torch.float32), predicted_goal) # it can overfit just fine
-					
-					# Optimization step
-					self.state_optimizer.zero_grad()
-					loss.backward()
-					torch.nn.utils.clip_grad_norm_(self.dt.parameters(), 0.25)
-					self.state_optimizer.step()
+				init_goal_pair 			= goal_concat_t(achieved_goals[0,0], predicted_goal)
+				aim_val_t 				= self.agent.aim_discriminator(init_goal_pair)
+
+				q1_t, q2_t				= self.get_q_values(predicted_goal)
+				q_val_t					= torch.min(q1_t,q2_t)
+
+				exploration_val 		= self.calculate_exploration_value(achieved_goals[0],predicted_goal)
+
+				goal_val 				= self.gamma * aim_val_t + q_val_t * (self.beta) + self.sigma * exploration_val
+
+				# Calculate loss between expected RTG difference and predicted RTG
+				loss  					= torch.nn.L1Loss()(goal_val, expected_val.unsqueeze(0))
+				loss 					+= self.chi_distance_loss(predicted_goal, achieved_goals[:,i], .5)
+				# loss = torch.nn.MSELoss()(torch.tensor([0,8], device = "cuda", dtype= torch.float32), predicted_goal) # it can overfit just fine
+				
+				# Optimization step
+				self.state_optimizer.zero_grad()
+				loss.backward()
+				torch.nn.utils.clip_grad_norm_(self.dt.parameters(), 0.25)
+				self.state_optimizer.step()
 		self.visualize_value_heatmaps_for_debug()
 
 		return loss.item()  # Return the last computed loss
+	def chi_distance_loss(self, a, b, demanded_dist):
+		dist = torch.sqrt(torch.sum((a - b) ** 2))
+		loss = (demanded_dist - dist) ** 2
+		return loss
 
-	def sample(self, episode_observes = None):
-		if episode_observes is None:
+	
+		
+	def sample(self, episode_observes = None, qs = None):
+		if episode_observes is None or qs is None:
 			if self.latest_achieved is None:
 				return np.array([0,8])
-			goal_t =  self.generate_goal(self.latest_achieved,[self.latest_rtgs + self.return_to_add])
+			goal_t =  self.generate_goal(self.latest_achieved,self.latest_rtgs + self.return_to_add)
 			goal =  goal_t.detach().cpu().numpy()
 			self.latest_desired_goal = goal
 
 			return goal
 		else:
-			pass # TODO work on the episode observes, instead of residual walking this might be better to implement
+			episode_observes = np.array([self.eval_env.convert_obs_to_dict(episode_observes[i])["achieved_goal"] for i in range(len(episode_observes))])
+			achieved_values= self.generate_achieved_values(episode_observes[0],episode_observes)
+			exploration_vals = np.array([self.calculate_exploration_value(episode_observes[0],episode_observes[i]) for i in range(len(episode_observes))])
+   
+			qs = np.min(qs, axis= 1)
+
+			rewards = self.gamma * achieved_values + self.beta * qs + self.sigma * exploration_vals# either get the qs earlier than 2000 steps or remove gamma limitation before then
+			rtgs = self.reward_to_rtg(rewards)
+   
+			exploration_vals = self.normalize_array(exploration_vals)
+			episode_observes = torch.tensor([episode_observes], device="cuda", dtype=torch.float32)
+			rtgs = torch.tensor([rtgs], device="cuda", dtype=torch.float32)
+			exploration_vals = self.normalize_array(exploration_vals)
+
+			goal_t = self.generate_goal(episode_observes, rtgs + self.return_to_add)
+			goal =  goal_t.detach().cpu().numpy()
+   
+			self.latest_desired_goal = goal
+			self.residual_goals_debug.append(goal)
+			
+			return goal
+
 
 	def generate_goal(self,achieved_goals,rtgs):
 		actions = torch.zeros((1, achieved_goals.shape[0], 2), device="cuda", dtype=torch.float32)
 		timesteps = torch.arange(achieved_goals.shape[0], device="cuda").unsqueeze(0)  # Adding batch dimension
-		achieved_goals = torch.tensor([achieved_goals], device="cuda", dtype=torch.float32)
+		achieved_goals = torch.tensor(achieved_goals, device="cuda", dtype=torch.float32)
 
-		rtgs = torch.tensor([rtgs], device = "cuda", dtype = torch.float32).unsqueeze(0)
+		rtgs = torch.tensor(rtgs, device = "cuda", dtype = torch.float32).unsqueeze(0)
 		desired_goal = self.dt.get_state(achieved_goals, actions, None, rtgs, timesteps)
+  
 		return desired_goal
 
 
@@ -436,12 +454,18 @@ class DTSampler:
 		ax.grid(True)
 
 	def visualize_trajectories_on_time(self, ax, title='Position Over Time'):
-		x = self.latest_achieved[:, 0]
-		y = self.latest_achieved[:, 1]
+		x = self.latest_achieved[0,:, 0]
+		y = self.latest_achieved[0,:, 1]
 		t = np.arange(0, len(x))
+
 
 		t_normalized = (t - t.min()) / (t.max() - t.min())
 		scatter = ax.scatter(x, y, c=t_normalized, cmap='viridis', edgecolor='k')
+		if len(self.residual_goals_debug):
+			residual_goals_np = np.array(self.residual_goals_debug)
+			res_x = residual_goals_np[:,0]
+			res_y = residual_goals_np[:,1]
+			ax.scatter(res_x, res_y, color='blue', marker='x', s=100, label='Latest Desired Goal')
 		ax.scatter(self.latest_desired_goal[0], self.latest_desired_goal[1], color='red', marker='x', s=100, label='Latest Desired Goal')
 
 		cbar = ax.figure.colorbar(scatter, ax=ax, label='Time step')
@@ -454,15 +478,26 @@ class DTSampler:
 		ax.set_aspect('equal')  # Ensuring equal aspect ratio
 		ax.grid(True)
 	def visualize_trajectories_on_rtgs(self, ax, title='Position Over RTGs'):
-		x = self.latest_achieved[:, 0]
-		y = self.latest_achieved[:, 1]
-		rtgs = self.latest_rtgs
-
+		x = self.latest_achieved[0,:, 0]
+		y = self.latest_achieved[0,:, 1]
+		rtgs = self.latest_rtgs[0]
+		if self.residual_goals_debug:
+			residual_goals_np = np.array(self.residual_goals_debug)
+			res_x = residual_goals_np[:,0]
+			res_y = residual_goals_np[:,1]
+			ax.scatter(res_x, res_y, color='blue', marker='x', s=100, label='Latest Desired Goal')
+  
 		# Normalize time values to [0, 1] for color mapping
 		# t_normalized = (t - t.min()) / (t.max() - t.min())
 		scatter = ax.scatter(x, y, c=rtgs, cmap='viridis', edgecolor='k')
 		ax.scatter(self.latest_desired_goal[0], self.latest_desired_goal[1], color='red', marker='x', s=100, label='Latest Desired Goal')
-
+		ax.scatter(self.latest_desired_goal[0], self.latest_desired_goal[1], color='red', marker='x', s=100, label='Latest Desired Goal')
+  
+		if len(self.residual_goals_debug):
+			residual_goals_np = np.array(self.residual_goals_debug)
+			res_x = residual_goals_np[:,0]
+			res_y = residual_goals_np[:,1]
+			ax.scatter(res_x, res_y, color='blue', marker='x', s=100, label='Latest Desired Goal')
 		cbar = ax.figure.colorbar(scatter, ax=ax, label='Time step')
 
 		ax.set_xlabel('X Position')
