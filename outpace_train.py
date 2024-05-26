@@ -725,7 +725,7 @@ class Workspace(object):
             
             if self.cfg.use_residual_randomwalk:
                 if self.env.is_residual_goal:
-                    if (self.env.residual_goalstep % 10 == 0) or info.get('is_current_goal_success'):
+                    if info.get('is_current_goal_success'):
                         if (self.cfg.use_uncertainty_for_randomwalk not in [None, 'none', 'None']) and self.step > self.get_agent().meta_test_sample_size:
                             # residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
                             residual_goal = self.get_residual_goal_with_dt(episode,episode_observes,qs)

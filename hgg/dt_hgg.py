@@ -1,3 +1,5 @@
+from queue import PriorityQueue
+import random
 import numpy as np
 from hgg.gcc_utils import gcc_load_lib, c_double, c_int
 import torch
@@ -9,8 +11,36 @@ from dt.models.decision_transformer import DecisionTransformer
 import matplotlib.pyplot as plt
 from scipy.interpolate import griddata
 from video import VideoRecorder
+import heapq
+from hgg.utils import MoveOntheLastPartLoss
+class TrajectoryHeap:
+	class Trajectory:
+		def __init__(self, trajectory, rtgs) -> None:
+			self.trajectory = trajectory
+			self.rtgs = rtgs
+		def __lt__(self, other):
+			return self.rtgs[0] < other.rtgs[0]
 
+	def __init__(self, max_size = 5):
+		self.max_size = max_size
+		self.heap = []
 
+	def add(self, achieved_goals, rtgs):
+		traj = self.Trajectory(achieved_goals,rtgs)
+		if len(self.heap) < self.max_size:
+			heapq.heappush(self.heap, traj)
+		elif traj > self.heap[0]:
+			heapq.heapreplace(self.heap, traj)
+		return self.get_elements()
+
+	def get_elements(self):
+		trajectories = [traj.trajectory for traj in self.heap]
+		rtgs_s = [traj.rtgs for traj in self.heap]
+		return trajectories, rtgs_s
+
+def rescale_array(tensor, old_min, old_max, new_min =-1, new_max = 1):
+    rescaled_tensor = (tensor - old_min) / (old_max - old_min) * (new_max - new_min) + new_min
+    return tensor
 
 def goal_distance(goal_a, goal_b):
 	return np.linalg.norm(goal_a - goal_b, ord=2)
@@ -24,31 +54,6 @@ def discount_cumsum(x, gamma):
 	for t in reversed(range(x.shape[0]-1)):
 		discount_cumsum[t] = x[t] + gamma * discount_cumsum[t+1]
 	return discount_cumsum
-class TrajectoryPool:
-	def __init__(self, pool_length):
-		self.length = pool_length
-		self.pool = []
-		self.pool_init_state = []
-		self.counter = 0
-
-	def insert(self, trajectory, init_state):
-		if self.counter<self.length:
-			self.pool.append(trajectory.copy())
-			self.pool_init_state.append(init_state.copy())
-		else:
-			self.pool[self.counter%self.length] = trajectory.copy()
-			self.pool_init_state[self.counter%self.length] = init_state.copy()
-		self.counter += 1
-
-	def pad(self):
-		if self.counter>=self.length:
-			return copy.deepcopy(self.pool), copy.deepcopy(self.pool_init_state)
-		pool = copy.deepcopy(self.pool)
-		pool_init_state = copy.deepcopy(self.pool_init_state)
-		while len(pool)<self.length:
-			pool += copy.deepcopy(self.pool)
-			pool_init_state += copy.deepcopy(self.pool_init_state)
-		return copy.deepcopy(pool[:self.length]), copy.deepcopy(pool_init_state[:self.length])
 
 class DTSampler:    
 	def __init__(self, goal_env, goal_eval_env, 				
@@ -101,6 +106,9 @@ class DTSampler:
 		self.latest_desired_goal = self.final_goal
 		self.max_rewards_so_far = []
 		self.residual_goals_debug = []
+		self.best_trajectories =  TrajectoryHeap(max_size=5)
+		self.number_of_trajectories_per_episode = 2
+		self.dumb_prevention_loss = MoveOntheLastPartLoss(threshold=4)
 	def reward_to_rtg(self,rewards):
 		return rewards - rewards[-1]
 
@@ -115,7 +123,7 @@ class DTSampler:
 		with torch.no_grad(): ## when using no_grad, no gradients will be calculated or stored for operations on tensors, which can reduce memory usage and speed up computations				
 			init_to_goal_pair_t  = torch.from_numpy(np.stack(init_to_goal_pair, axis =0)).float().to(self.device) #[ts, dim]				
 			goal_to_final_pair_t = torch.from_numpy(np.stack(goal_to_final_pair, axis =0)).float().to(self.device) #[ts, dim]				
-			values = +self.agent.aim_discriminator(goal_to_final_pair_t).detach().cpu().numpy()[:, 0] # TODO discover inside aim_discriminator,
+			values = -self.agent.aim_discriminator(init_to_goal_pair_t).detach().cpu().numpy()[:, 0] # TODO discover inside aim_discriminator,
 																							# 	* what kind of inputs it does require
 																							# 	* value can be interpreted as a measure of how desirable or advantageous the current state is from the perspective of achieving the final goal
 			# values += self.agent.aim_discriminator(goal_to_final_pair_t).detach().cpu().numpy()[:, 0] 
@@ -157,15 +165,7 @@ class DTSampler:
 
 			# value = numerator / denominator
 			return value
-	def normalize_array(self,array):
-		# Shift min to 0 by subtracting the minimum value
-		shifted_array = array - np.min(array)
-
-		# Scale to the range [0, 1]
-		max_value 		= np.max(shifted_array)
-		normalized_0_1	= shifted_array / max_value if max_value > 0 else shifted_array
-		return 2 * normalized_0_1 - 1
-
+	 
 
 	def shorten_trajectory(self, achieved_goals, rtgs):
 		achieved_goals = achieved_goals[::3]# list of reduced ts		)
@@ -173,7 +173,58 @@ class DTSampler:
   
 		return achieved_goals, rtgs
 
-	
+	def get_max_min_rewards(self, init_state):
+		q1_t, q2_t = self.get_q_values(torch.tensor(self.final_goal, device = "cuda", dtype = torch.float32))
+		q_val = np.min([q1_t.detach().cpu().numpy(), q2_t.detach().cpu().numpy()])
+		aim_val = self.generate_achieved_values(init_state, [self.final_goal])[0]
+		expl_val = self.calculate_exploration_value(init_state, self.final_goal)
+
+		max_aim 	= aim_val
+		max_expl	= expl_val
+		max_q		= q_val
+  
+		q1_t, q2_t = self.get_q_values(torch.tensor(init_state, device = "cuda", dtype = torch.float32))
+		q_val = np.min([q1_t.detach().cpu().numpy(), q2_t.detach().cpu().numpy()])
+		aim_val = self.generate_achieved_values(init_state, [init_state])[0]
+		expl_val = self.calculate_exploration_value(init_state, init_state)
+  
+		min_aim 	= aim_val
+		min_expl	= expl_val
+		min_q		= q_val
+
+		val_dict = {'max_aim' : max_aim,
+              		'min_aim' : min_aim,
+              		'max_expl' : max_expl,
+              		'min_expl' : min_expl,
+              		'max_q' : max_q + 1e-10 ,
+              		'min_q' : min_q - 1e-10 ,
+                }
+		return val_dict
+
+
+	def get_rescaled_rewards(self,achieved_goals, qs):
+		achieved_values= self.generate_achieved_values(self.init_goal,achieved_goals)
+		exploration_values = np.array([self.calculate_exploration_value(self.init_goal,achieved_goals[i]) for i in range(len(achieved_goals))])
+
+		val_dict = self.get_max_min_rewards(achieved_goals[0])
+		if qs is None:
+			qs = np.array([])
+			for pos in achieved_goals:
+				q1_t, q2_t = self.get_q_values(torch.tensor(pos, device="cuda", dtype=torch.float32))
+
+				q_min_t = torch.min(q1_t,q2_t)
+				q_min = q_min_t.detach().cpu().numpy()
+				qs = np.append(qs,q_min)
+		else:
+			qs = np.min(qs, axis= 1)
+
+		achieved_values		=	rescale_array(achieved_values, val_dict['min_aim'], val_dict["max_aim"])
+		exploration_values	=	rescale_array(exploration_values, val_dict['min_expl'], val_dict["max_expl"])
+		q_values			=	rescale_array(qs, val_dict['min_q'], val_dict["max_q"])
+  
+		return achieved_values, exploration_values, q_values, val_dict
+
+  
 	def update(self, step, episode, achieved_goals, qs):
 		
 		
@@ -184,33 +235,31 @@ class DTSampler:
 		self.step = step
 		self.episode = episode
 		achieved_goals = np.array([self.eval_env.convert_obs_to_dict(achieved_goals[i])["achieved_goal"] for i in range(len(achieved_goals))])
-		achieved_values= self.generate_achieved_values(achieved_goals[0],achieved_goals)
-		exploration_vals = np.array([self.calculate_exploration_value(achieved_goals[0],achieved_goals[i]) for i in range(len(achieved_goals))])
 
-		# qs = self.normalize_array(qs)
-		qs = np.min(qs, axis= 1)
-		# achieved_values = self.normalize_array(achieved_values)
-		exploration_vals = self.normalize_array(exploration_vals)
-		
-		rewards = self.gamma * achieved_values + self.beta * qs + self.sigma * exploration_vals# either get the qs earlier than 2000 steps or remove gamma limitation before then
-		rewards = self.normalize_array(rewards)
+
+		achieved_values, exploration_values, q_values, min_max_val_dict = self.get_rescaled_rewards(achieved_goals, qs)
+		rewards = self.gamma * achieved_values + self.beta * q_values + self.sigma * exploration_values# either get the qs earlier than 2000 steps or remove gamma limitation before then
 
 		rtgs = self.reward_to_rtg(rewards)
-		# qs = np.min(qs, axis = 1)
 
-		# achieved_goals, rtgs 	= self.shorten_trajectory(achieved_goals, rtgs)
 
 		self.latest_achieved 	= np.array([achieved_goals])
 		self.latest_rtgs 		= np.array([rtgs])
-		
-		self.train_single_trajectory(achieved_goals, rtgs)		
-		self.max_achieved_reward = max(rtgs)
+  
+		achieved_goalss, rtgss = self.best_trajectories.add(achieved_goals,rtgs)
+		rand_ind = random.randint(0, len(self.best_trajectories.heap)-1)
+		# for i in range(len(achieved_goalss)):
+		self.train_single_trajectory(achieved_goalss[rand_ind], rtgss[rand_ind], min_max_val_dict)
+   		
+		self.max_achieved_reward = max(max(rtgs),self.max_achieved_reward)
 		self.max_rewards_so_far.append(self.max_achieved_reward)
 		self.residual_goals_debug = []
 		
+		
 
-
-	def train_single_trajectory(self, achieved_goals, rtgs):
+	def train_single_trajectory(self, achieved_goals, rtgs, min_max_val_dict):
+	 
+		
 		# Ensure input tensors are on the correct device and type
 		achieved_goals = torch.tensor([achieved_goals], device="cuda", dtype=torch.float32)
 		rtgs = torch.tensor([rtgs], device="cuda", dtype=torch.float32)
@@ -230,13 +279,13 @@ class DTSampler:
 			temp_rtg = rtgs[:,:i].clone()
 			temp_rtg -= rtgs[0,i+1]
 			temp_rtg = temp_rtg.unsqueeze(-1) 	
-			# temp_rtg = rtgs[:,:i].clone()
-			# temp_rtg = temp_rtg.unsqueeze(-1) 
+
 
 			# Forward pass to predict the next goal
 			# Assuming the last state's output (new goal) is what you want to compare against
-			predicted_goal, _, _  	= self.dt.forward(temp_achieved, temp_actions, None, temp_rtg, temp_timesteps)#, attention_mask=attention_mask)
+			predicted_goal, _, predicted_return  	= self.dt.forward(temp_achieved, temp_actions, None, temp_rtg, temp_timesteps)#, attention_mask=attention_mask)
 			predicted_goal 			= predicted_goal[0,-1]
+			predicted_return 		= predicted_return[0,-1]
 			# Calculate the difference in RTG to simulate the value difference locations
 			# Assuming each step predicts a goal for the next state
 			if i < achieved_goals.shape[1] - 1:
@@ -249,22 +298,28 @@ class DTSampler:
 				q_val_t					= torch.min(q1_t,q2_t)
 
 				exploration_val 		= self.calculate_exploration_value(achieved_goals[0],predicted_goal)
-
-				goal_val 				= self.gamma * aim_val_t + q_val_t * (self.beta) + self.sigma * exploration_val
-
-				# Calculate loss between expected RTG difference and predicted RTG
-				loss  					= torch.nn.L1Loss()(goal_val, expected_val.unsqueeze(0))
-				loss 					+= self.chi_distance_loss(predicted_goal, achieved_goals[:,i], .5)
-				# loss = torch.nn.MSELoss()(torch.tensor([0,8], device = "cuda", dtype= torch.float32), predicted_goal) # it can overfit just fine
+				aim_val_t 				= rescale_array(aim_val_t, min_max_val_dict["min_aim"],  min_max_val_dict["max_aim"])
+				exploration_val 		= rescale_array(exploration_val, min_max_val_dict["min_expl"],  min_max_val_dict["max_expl"])
+				q_val_t			 		= rescale_array(q_val_t, min_max_val_dict["min_q"],  min_max_val_dict["max_q"])
+				goal_val_t 				= self.gamma * aim_val_t + q_val_t * self.beta + self.sigma * exploration_val
+				best_state_index = torch.argmin(temp_rtg[0])
 				
+				# Calculate loss between expected RTG difference and predicted RTG
+				rtg_pred_loss  					= torch.nn.L1Loss()(goal_val_t, expected_val.unsqueeze(0))
+				state_pred_loss					= self.chi_distance_loss(predicted_goal, achieved_goals[:,i], 1.0)
+				# rtg_gain_reward					= torch.nn.L1Loss()(goal_val ,(rtgs[0,0] - rtgs[0,best_state_index]).unsqueeze(-1))
+				dumb_loss = self.dumb_prevention_loss.forward(temp_achieved,predicted_goal)
+				total_loss = rtg_pred_loss + state_pred_loss + goal_val_t#- goal_val_t #+ dumb_loss
+				# loss = torch.nn.MSELoss()(torch.tensor([0,8], device = "cuda", dtype= torch.float32), predicted_goal) # it can overfit just fine
+				# print(f"rtg gain reward : {rtg_gain_reward},\nstate_pred_loss : {state_pred_loss}\nrtg_pred_loss : {rtg_pred_loss}, {goal_val} + {predicted_return} = {expected_val}")
 				# Optimization step
 				self.state_optimizer.zero_grad()
-				loss.backward()
+				total_loss.backward()
 				torch.nn.utils.clip_grad_norm_(self.dt.parameters(), 0.25)
 				self.state_optimizer.step()
 		self.visualize_value_heatmaps_for_debug()
 
-		return loss.item()  # Return the last computed loss
+		return total_loss.item()  # Return the last computed loss
 	def chi_distance_loss(self, a, b, demanded_dist):
 		dist = torch.sqrt(torch.sum((a - b) ** 2))
 		loss = (demanded_dist - dist) ** 2
@@ -276,25 +331,23 @@ class DTSampler:
 		if episode_observes is None or qs is None:
 			if self.latest_achieved is None:
 				return np.array([0,8])
-			goal_t =  self.generate_goal(self.latest_achieved,self.latest_rtgs + self.return_to_add)
+			# goal_t =  self.generate_goal(self.latest_achieved,self.latest_rtgs + self.return_to_add)
+			trajectories, rtgs = self.best_trajectories.get_elements()
+			goal_t = self.generate_goal(trajectories[0], rtgs[0] + self.return_to_add )
 			goal =  goal_t.detach().cpu().numpy()
 			self.latest_desired_goal = goal
 
 			return goal
 		else:
 			episode_observes = np.array([self.eval_env.convert_obs_to_dict(episode_observes[i])["achieved_goal"] for i in range(len(episode_observes))])
-			achieved_values= self.generate_achieved_values(episode_observes[0],episode_observes)
-			exploration_vals = np.array([self.calculate_exploration_value(episode_observes[0],episode_observes[i]) for i in range(len(episode_observes))])
-   
-			qs = np.min(qs, axis= 1)
 
-			rewards = self.gamma * achieved_values + self.beta * qs + self.sigma * exploration_vals# either get the qs earlier than 2000 steps or remove gamma limitation before then
+			achieved_values, exploration_values, q_values, val_dict = self.get_rescaled_rewards(episode_observes, qs)
+
+			rewards = self.gamma * achieved_values + self.beta * q_values + self.sigma * exploration_values# either get the qs earlier than 2000 steps or remove gamma limitation before then
 			rtgs = self.reward_to_rtg(rewards)
    
-			exploration_vals = self.normalize_array(exploration_vals)
 			episode_observes = torch.tensor([episode_observes], device="cuda", dtype=torch.float32)
 			rtgs = torch.tensor([rtgs], device="cuda", dtype=torch.float32)
-			exploration_vals = self.normalize_array(exploration_vals)
 
 			goal_t = self.generate_goal(episode_observes, rtgs + self.return_to_add)
 			goal =  goal_t.detach().cpu().numpy()
@@ -320,124 +373,105 @@ class DTSampler:
 	def visualize_value_heatmaps_for_debug(self):
 		assert self.video_recorder is not None
 		fig_shape = (3,3)
-		fig, axs = plt.subplots(fig_shape[0],fig_shape[1], figsize=(16, 6))  # 1 row, 2 columns of subplots
-		combined_heatmap = self.create_combined_np() # type: ignore
-
+		fig, axs = plt.subplots(fig_shape[0], fig_shape[1], figsize=(16, 12), constrained_layout=True)  # 3 rows, 3 columns of subplots
+		combined_heatmap = self.create_combined_np()  # type: ignore
+		achieved_values, exploration_values, q_values, _ = self.get_rescaled_rewards(combined_heatmap, None)
+		achieved_values = achieved_values.reshape(-1, 1)
+		exploration_values = exploration_values.reshape(-1, 1)
+		q_values = q_values.reshape(-1, 1)
+		q_pos_val = np.hstack((combined_heatmap, self.beta * q_values))
+		aim_pos_val = np.hstack((combined_heatmap, self.gamma * achieved_values))
+		expl_pos_val = np.hstack((combined_heatmap, self.sigma * exploration_values))
+		combined_pos_val = np.hstack((combined_heatmap, (self.beta * q_values +  self.gamma * achieved_values + self.sigma * exploration_values)))
 		plot_dict = {}
-		plot_dict["Q Heatmap"], q1_vals, q2_vals  = self.generate_q_values_for_heatmap()
-		plot_dict["Aim Heatmap"]  = self.generate_aim_values_for_heatmap()
-		plot_dict["Explore Heatmap"]  = self.generate_exploration_values_for_heatmap()
+		plot_dict["Q Heatmap"] = q_pos_val
+		plot_dict["Aim Heatmap"]  = aim_pos_val
+		plot_dict["Explore Heatmap"]  = expl_pos_val
+		plot_dict["Combined Heatmap"] = combined_pos_val
+		
+  		# for heatmap in plot_dict.values():
+		# 	combined_heatmap[:, 2] += heatmap[:, 2]
 
-		for heatmap in plot_dict.values():
-			combined_heatmap[:,2] += heatmap[:,2]
+		# plot_dict["Combined Heatmap"] = combined_heatmap
 
-		plot_dict["Combined Heatmap"] = combined_heatmap
-		plot_dict["Q1 Heatmap"], plot_dict["Q2 Heatmap"] = q1_vals, q2_vals
+		for i, key in enumerate(plot_dict.keys()):
+			pos = (i // fig_shape[1], i % fig_shape[1])
+			self.plot_heatmap(plot_dict[key], axs[pos[0]][pos[1]], key)
 
-		for i,key in enumerate(plot_dict.keys()):
-
-			pos = (i // fig_shape[1],i % fig_shape[1])
-			self.plot_heatmap(plot_dict[key],axs[pos[0]][pos[1]],key)
-
-		i +=1
-		pos = (i // fig_shape[1],i % fig_shape[1])
+		i += 1
+		pos = (i // fig_shape[1], i % fig_shape[1])
 		self.visualize_trajectories_on_time(axs[pos[0]][pos[1]])
 
-		i +=1
-		pos = (i // fig_shape[1],i % fig_shape[1])
+		i += 1
+		pos = (i // fig_shape[1], i % fig_shape[1])
 		self.visualize_trajectories_on_rtgs(axs[pos[0]][pos[1]])
-  
-		i +=1
-		pos = (i // fig_shape[1],i % fig_shape[1])
+
+		i += 1
+		pos = (i // fig_shape[1], i % fig_shape[1])
 		self.visualize_max_rewards(axs[pos[0]][pos[1]])
+
+		i += 1
+		pos = (i // fig_shape[1], i % fig_shape[1])
+		self.visualize_best_trajectories(axs[pos[0]][pos[1]], "Trajectories 1")
+
+		# i += 1
+		# pos = (i // fig_shape[1], i % fig_shape[1])
+		# self.visualize_best_trajectories(axs[pos[0]][pos[1]], "Trajectories 2")
 
 		plt.savefig(
 			f'{self.video_recorder.debug_dir}/combined_heatmaps_episode_{str(self.episode)}.jpg'
 		)
 		plt.close(fig)
+
 	def visualize_max_rewards(self, ax):
 		max_rewards_np = np.array(self.max_rewards_so_far)
 		x = np.arange(0, len(max_rewards_np))
-		ax.plot(x, max_rewards_np, label='Trend', marker='o', markersize=5, linestyle='-', linewidth=2)
+		ax.plot(x, max_rewards_np, label='Trend', marker='.', markersize=5, linestyle='-', linewidth=2)
 		ax.set_xlabel('x')
 		ax.set_ylabel('reward')
 		ax.set_title('Max Rewards')
-		# ax.set_aspect('equal')  # Ensuring equal aspect ratio
-
 		ax.grid(True)  # Enable grid for better readability
 
+	def visualize_best_trajectories(self, ax, title):
+		trajectories, rtgs = self.best_trajectories.get_elements()
+		colors = ['b', 'g', 'r', 'yellow', 'purple']
+		for i, traj in enumerate(trajectories):
+			x = traj[:, 0]
+			y = traj[:, 1]
+			ax.plot(x, y, marker='o', linestyle='-', color=colors[i])
+		ax.set_title(title)
+		ax.set_xlabel('X Position')
+		ax.set_ylabel('Y Position')
+		ax.set_xlim(-2, 8)
+		ax.set_ylim(-2, 8)    
+		ax.grid(True)
 
 	def create_combined_np(self):
 		data_points = [
-			[x, y, 0.0]
+			[x, y]
 			for x, y in itertools.product(
-				range(self.limits[0][0], self.limits[0][1]),
-				range(self.limits[1][0], self.limits[1][1]),
+				range(self.limits[0][0], self.limits[0][1] + 1),
+				range(self.limits[1][0], self.limits[1][1] + 1),
 			)
 		]
 		return np.array(data_points, dtype=np.float32)
-	
-	def generate_aim_values_for_heatmap(self):
-		data_points = []
-		i = 0
-		for x in range(self.limits[0][0], self.limits[0][1]):
-			for y in range(self.limits[1][0], self.limits[1][1]):
-				pos = np.array([x, y])
-				init_to_goal_pair	= [goal_concat(self.init_goal, pos)]
-				goal_to_final_pair	= [goal_concat(pos, self.final_goal)]
-				with torch.no_grad():
-					init_to_goal_pair_t = torch.from_numpy(np.stack(init_to_goal_pair, axis=0)).float().to(self.device)
-					goal_to_final_pair_t = torch.from_numpy(np.stack(init_to_goal_pair, axis=0)).float().to(self.device)
-
-					aim_val = -self.agent.aim_discriminator(init_to_goal_pair_t).detach().cpu().numpy()[:, 0]
-					# aim_val += self.agent.aim_discriminator(goal_to_final_pair_t).detach().cpu().numpy()[:, 0] 
-				data_points.append([x, y, self.gamma * aim_val])
-				i+= 1
-		data_points = np.array(data_points,  dtype=np.float32)
-		data_points[:,2] = self.normalize_array(data_points[:,2])
-		return data_points
-
-	def generate_q_values_for_heatmap(self):
-		q1_data_points = []
-		q2_data_points = []
-		q_min_data_points = []
-		i = 0
-
-		for x in range(self.limits[0][0], self.limits[0][1]):
-			for y in range(self.limits[1][0], self.limits[1][1]):
-				pos = torch.tensor([x, y], device=self.device)
-				q1_t,q2_t = self.get_q_values(pos)
-				q_val_t = torch.min(q1_t,q2_t)
-				q_val = q_val_t.detach().cpu().numpy()
-				q1 = q1_t.detach().cpu().numpy()
-				q2 = q2_t.detach().cpu().numpy()
-				q_min_data_points.append([x, y, self.beta *q_val])
-				q1_data_points.append([x, y, self.beta *q1])
-				q2_data_points.append([x, y, self.beta *q2])
-				i+= 1
-		q_min_data_points = np.array(q_min_data_points,  dtype=np.float32)
-		q_min_data_points[:,2] = self.normalize_array(q_min_data_points[:,2])
-		q1_data_points = np.array(q1_data_points,  dtype=np.float32)
-		q1_data_points[:,2] = self.normalize_array(q1_data_points[:,2])
-		q2_data_points = np.array(q2_data_points,  dtype=np.float32)
-		q2_data_points[:,2] = self.normalize_array(q2_data_points[:,2])
-		return q_min_data_points, q1_data_points, q2_data_points
-
-	
-	def generate_exploration_values_for_heatmap(self):
-		data_points = []
-		i = 0
-
-		for x in range(self.limits[0][0], self.limits[0][1]):
-			for y in range(self.limits[1][0], self.limits[1][1]):
-				pos = [x,y]
-				exploration_val = self.calculate_exploration_value(self.init_goal, pos)
-				data_points.append([x, y, exploration_val])
-				i+= 1
-		return np.array(data_points,  dtype=np.float32)
 
 
 	def plot_heatmap(self, data_points, ax, title):
+		x = data_points[:, 0]
+		y = data_points[:, 1]
+		values = data_points[:, 2]
+		grid_x, grid_y = np.mgrid[min(x):max(x):100j, min(y):max(y):100j]
+		grid_values = griddata((x, y), values, (grid_x, grid_y), method='cubic')
+		im = ax.imshow(grid_values.T, extent=(min(x), max(x), min(y), max(y)), origin='lower', cmap='viridis')
+		ax.figure.colorbar(im, ax=ax, label='Value')
+		ax.set_title(title)
+		ax.set_xlabel('X coordinate')
+		ax.set_ylabel('Y coordinate')
+		ax.set_xlim(-2, 8)
+		ax.set_ylim(-2, 8)
+		ax.set_aspect('equal')  # Ensuring equal aspect ratio
+		ax.grid(True)
 		x = data_points[:, 0]
 		y = data_points[:, 1]
 		values = data_points[:, 2]
@@ -473,8 +507,8 @@ class DTSampler:
 		ax.set_xlabel('X Position')
 		ax.set_ylabel('Y Position')
 		ax.set_title(title)
-		ax.set_xlim(-5, 10)
-		ax.set_ylim(-5, 10)
+		ax.set_xlim(-2, 8)
+		ax.set_ylim(-2, 8)
 		ax.set_aspect('equal')  # Ensuring equal aspect ratio
 		ax.grid(True)
 	def visualize_trajectories_on_rtgs(self, ax, title='Position Over RTGs'):
@@ -503,7 +537,7 @@ class DTSampler:
 		ax.set_xlabel('X Position')
 		ax.set_ylabel('Y Position')
 		ax.set_title(title)
-		ax.set_xlim(-5, 10)
-		ax.set_ylim(-5, 10)
+		ax.set_xlim(-2, 8)
+		ax.set_ylim(-2, 8)
 		ax.set_aspect('equal')  # Ensuring equal aspect ratio
 		ax.grid(True)
