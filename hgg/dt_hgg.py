@@ -39,7 +39,7 @@ class TrajectoryHeap:
 		return trajectories, rtgs_s
 
 def rescale_array(tensor, old_min, old_max, new_min =-1, new_max = 1):
-    rescaled_tensor = (tensor - old_min) / (old_max - old_min) * (new_max - new_min) + new_min
+    # rescaled_tensor = (tensor - old_min) / (old_max - old_min) * (new_max - new_min) + new_min
     return tensor
 
 def goal_distance(goal_a, goal_b):
@@ -218,7 +218,7 @@ class DTSampler:
 		else:
 			qs = np.min(qs, axis= 1)
 
-		achieved_values		=	rescale_array(achieved_values, val_dict['min_aim'], val_dict["max_aim"])
+		# achieved_values		=	rescale_array(achieved_values, val_dict['min_aim'], val_dict["max_aim"])
 		exploration_values	=	rescale_array(exploration_values, val_dict['min_expl'], val_dict["max_expl"])
 		q_values			=	rescale_array(qs, val_dict['min_q'], val_dict["max_q"])
   
@@ -246,10 +246,10 @@ class DTSampler:
 		self.latest_achieved 	= np.array([achieved_goals])
 		self.latest_rtgs 		= np.array([rtgs])
   
-		achieved_goalss, rtgss = self.best_trajectories.add(achieved_goals,rtgs)
-		rand_ind = random.randint(0, len(self.best_trajectories.heap)-1)
+		# achieved_goalss, rtgss = self.best_trajectories.add(achieved_goals,rtgs)
+		# rand_ind = random.randint(0, len(self.best_trajectories.heap)-1)
 		# for i in range(len(achieved_goalss)):
-		self.train_single_trajectory(achieved_goalss[rand_ind], rtgss[rand_ind], min_max_val_dict)
+		self.train_single_trajectory(achieved_goals, rtgs, min_max_val_dict)
    		
 		self.max_achieved_reward = max(max(rtgs),self.max_achieved_reward)
 		self.max_rewards_so_far.append(self.max_achieved_reward)
@@ -258,7 +258,8 @@ class DTSampler:
 		
 
 	def train_single_trajectory(self, achieved_goals, rtgs, min_max_val_dict):
-	 
+		
+		goals_predicted_debug = []
 		
 		# Ensure input tensors are on the correct device and type
 		achieved_goals = torch.tensor([achieved_goals], device="cuda", dtype=torch.float32)
@@ -286,6 +287,7 @@ class DTSampler:
 			predicted_goal, _, predicted_return  	= self.dt.forward(temp_achieved, temp_actions, None, temp_rtg, temp_timesteps)#, attention_mask=attention_mask)
 			predicted_goal 			= predicted_goal[0,-1]
 			predicted_return 		= predicted_return[0,-1]
+			goals_predicted_debug.append(predicted_goal.detach().cpu().numpy())
 			# Calculate the difference in RTG to simulate the value difference locations
 			# Assuming each step predicts a goal for the next state
 			if i < achieved_goals.shape[1] - 1:
@@ -309,7 +311,7 @@ class DTSampler:
 				state_pred_loss					= self.chi_distance_loss(predicted_goal, achieved_goals[:,i], 1.0)
 				# rtg_gain_reward					= torch.nn.L1Loss()(goal_val ,(rtgs[0,0] - rtgs[0,best_state_index]).unsqueeze(-1))
 				dumb_loss = self.dumb_prevention_loss.forward(temp_achieved,predicted_goal)
-				total_loss = rtg_pred_loss + state_pred_loss + goal_val_t#- goal_val_t #+ dumb_loss
+				total_loss = rtg_pred_loss + state_pred_loss - q_val_t#- goal_val_t #+ dumb_loss
 				# loss = torch.nn.MSELoss()(torch.tensor([0,8], device = "cuda", dtype= torch.float32), predicted_goal) # it can overfit just fine
 				# print(f"rtg gain reward : {rtg_gain_reward},\nstate_pred_loss : {state_pred_loss}\nrtg_pred_loss : {rtg_pred_loss}, {goal_val} + {predicted_return} = {expected_val}")
 				# Optimization step
@@ -317,7 +319,8 @@ class DTSampler:
 				total_loss.backward()
 				torch.nn.utils.clip_grad_norm_(self.dt.parameters(), 0.25)
 				self.state_optimizer.step()
-		self.visualize_value_heatmaps_for_debug()
+		goals_predicted_debug_np = np.array(goals_predicted_debug)
+		self.visualize_value_heatmaps_for_debug(goals_predicted_debug_np)
 
 		return total_loss.item()  # Return the last computed loss
 	def chi_distance_loss(self, a, b, demanded_dist):
@@ -331,9 +334,9 @@ class DTSampler:
 		if episode_observes is None or qs is None:
 			if self.latest_achieved is None:
 				return np.array([0,8])
-			# goal_t =  self.generate_goal(self.latest_achieved,self.latest_rtgs + self.return_to_add)
-			trajectories, rtgs = self.best_trajectories.get_elements()
-			goal_t = self.generate_goal(trajectories[0], rtgs[0] + self.return_to_add )
+			goal_t =  self.generate_goal(self.latest_achieved,self.latest_rtgs + self.return_to_add)
+			# trajectories, rtgs = self.best_trajectories.get_elements()
+			# goal_t = self.generate_goal(episode_observes, rtgs[0] + self.return_to_add )
 			goal =  goal_t.detach().cpu().numpy()
 			self.latest_desired_goal = goal
 
@@ -370,7 +373,7 @@ class DTSampler:
 
 
 
-	def visualize_value_heatmaps_for_debug(self):
+	def visualize_value_heatmaps_for_debug(self, goals_predicted_during_training):
 		assert self.video_recorder is not None
 		fig_shape = (3,3)
 		fig, axs = plt.subplots(fig_shape[0], fig_shape[1], figsize=(16, 12), constrained_layout=True)  # 3 rows, 3 columns of subplots
@@ -397,6 +400,7 @@ class DTSampler:
 		for i, key in enumerate(plot_dict.keys()):
 			pos = (i // fig_shape[1], i % fig_shape[1])
 			self.plot_heatmap(plot_dict[key], axs[pos[0]][pos[1]], key)
+			axs[pos[0]][pos[1]].scatter(goals_predicted_during_training[:,0],goals_predicted_during_training[:,1], c = np.arange(len(goals_predicted_during_training)), cmap = "gist_heat", s=10)
 
 		i += 1
 		pos = (i // fig_shape[1], i % fig_shape[1])
@@ -455,7 +459,6 @@ class DTSampler:
 			)
 		]
 		return np.array(data_points, dtype=np.float32)
-
 
 	def plot_heatmap(self, data_points, ax, title):
 		x = data_points[:, 0]
