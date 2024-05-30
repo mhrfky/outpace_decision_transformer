@@ -102,7 +102,7 @@ class DTSampler:
 		self.max_achieved_reward = 0
 		self.return_to_add = 0.05
 		self.discount_rate = 1# 0.99 #TODO add this as init value
-		self.limits = [[-2,8],[-2,8], [0,0]] # TODO make this generic
+		self.limits = [[-2,10],[-2,10], [0,0]] # TODO make this generic
 		self.latest_desired_goal = self.final_goal
 		self.max_rewards_so_far = []
 		self.residual_goals_debug = []
@@ -291,27 +291,28 @@ class DTSampler:
 			# Calculate the difference in RTG to simulate the value difference locations
 			# Assuming each step predicts a goal for the next state
 			if i < achieved_goals.shape[1] - 1:
-				expected_val 			= temp_rtg[0,0,0]  # Calculate the expected RTG difference
+				expected_val 			= temp_rtg[0,0,0] - torch.min(temp_rtg[0,0,:])# Calculate the expected RTG difference
 
 				init_goal_pair 			= goal_concat_t(achieved_goals[0,0], predicted_goal)
+    
 				aim_val_t 				= self.agent.aim_discriminator(init_goal_pair)
-
 				q1_t, q2_t				= self.get_q_values(predicted_goal)
 				q_val_t					= torch.min(q1_t,q2_t)
-
 				exploration_val 		= self.calculate_exploration_value(achieved_goals[0],predicted_goal)
+    
 				aim_val_t 				= rescale_array(aim_val_t, min_max_val_dict["min_aim"],  min_max_val_dict["max_aim"])
 				exploration_val 		= rescale_array(exploration_val, min_max_val_dict["min_expl"],  min_max_val_dict["max_expl"])
 				q_val_t			 		= rescale_array(q_val_t, min_max_val_dict["min_q"],  min_max_val_dict["max_q"])
+    
 				goal_val_t 				= self.gamma * aim_val_t + q_val_t * self.beta + self.sigma * exploration_val
 				best_state_index = torch.argmin(temp_rtg[0])
 				
 				# Calculate loss between expected RTG difference and predicted RTG
 				rtg_pred_loss  					= torch.nn.L1Loss()(goal_val_t, expected_val.unsqueeze(0))
-				state_pred_loss					= self.chi_distance_loss(predicted_goal, achieved_goals[:,i], 1.0)
+				state_pred_loss					= self.chi_distance_loss(predicted_goal, achieved_goals[:,best_state_index], 1.0)
 				# rtg_gain_reward					= torch.nn.L1Loss()(goal_val ,(rtgs[0,0] - rtgs[0,best_state_index]).unsqueeze(-1))
 				dumb_loss = self.dumb_prevention_loss.forward(temp_achieved,predicted_goal)
-				total_loss = rtg_pred_loss + state_pred_loss - q_val_t#- goal_val_t #+ dumb_loss
+				total_loss = rtg_pred_loss  - q_val_t#- goal_val_t #+ dumb_loss
 				# loss = torch.nn.MSELoss()(torch.tensor([0,8], device = "cuda", dtype= torch.float32), predicted_goal) # it can overfit just fine
 				# print(f"rtg gain reward : {rtg_gain_reward},\nstate_pred_loss : {state_pred_loss}\nrtg_pred_loss : {rtg_pred_loss}, {goal_val} + {predicted_return} = {expected_val}")
 				# Optimization step
@@ -446,8 +447,8 @@ class DTSampler:
 		ax.set_title(title)
 		ax.set_xlabel('X Position')
 		ax.set_ylabel('Y Position')
-		ax.set_xlim(-2, 8)
-		ax.set_ylim(-2, 8)    
+		ax.set_xlim(-2, 10)
+		ax.set_ylim(-2, 10)    
 		ax.grid(True)
 
 	def create_combined_np(self):
@@ -471,8 +472,8 @@ class DTSampler:
 		ax.set_title(title)
 		ax.set_xlabel('X coordinate')
 		ax.set_ylabel('Y coordinate')
-		ax.set_xlim(-2, 8)
-		ax.set_ylim(-2, 8)
+		ax.set_xlim(-2, 10)
+		ax.set_ylim(-2, 10)
 		ax.set_aspect('equal')  # Ensuring equal aspect ratio
 		ax.grid(True)
 		x = data_points[:, 0]
@@ -485,8 +486,8 @@ class DTSampler:
 		ax.set_title(title)
 		ax.set_xlabel('X coordinate')
 		ax.set_ylabel('Y coordinate')
-		ax.set_xlim(-2, 8)
-		ax.set_ylim(-2, 8)
+		ax.set_xlim(-2, 10)
+		ax.set_ylim(-2, 10)
 		ax.set_aspect('equal')  # Ensuring equal aspect ratio
 		ax.grid(True)
 
@@ -510,8 +511,8 @@ class DTSampler:
 		ax.set_xlabel('X Position')
 		ax.set_ylabel('Y Position')
 		ax.set_title(title)
-		ax.set_xlim(-2, 8)
-		ax.set_ylim(-2, 8)
+		ax.set_xlim(-2, 10)
+		ax.set_ylim(-2, 10)
 		ax.set_aspect('equal')  # Ensuring equal aspect ratio
 		ax.grid(True)
 	def visualize_trajectories_on_rtgs(self, ax, title='Position Over RTGs'):
@@ -540,7 +541,7 @@ class DTSampler:
 		ax.set_xlabel('X Position')
 		ax.set_ylabel('Y Position')
 		ax.set_title(title)
-		ax.set_xlim(-2, 8)
-		ax.set_ylim(-2, 8)
+		ax.set_xlim(-2, 10)
+		ax.set_ylim(-2, 10)
 		ax.set_aspect('equal')  # Ensuring equal aspect ratio
 		ax.grid(True)
