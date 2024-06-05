@@ -30,5 +30,5 @@ class MoveOntheLastPartLoss(nn.Module):
         
         # loss = (weight_denominator * number_of_effected_squared - 1)/ (epsilon + dist_denominator)
         loss = euclidean_distances * weight
-        return sum(loss)
+        return sum(below_threshold)
     
