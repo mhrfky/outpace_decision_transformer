@@ -54,7 +54,11 @@ class TimestepDistanceMap:
         y = math.floor(y - self.lower_boundary[1])
         with torch.no_grad():
             self.visitation_matrix[x, y] += 1
-
+    def update_cell_by(self, x, y,val):
+        x = math.floor(x - self.lower_boundary[0])
+        y = math.floor(y - self.lower_boundary[1])
+        with torch.no_grad():
+            self.visitation_matrix[x, y] += val
     def update_upon_trajectory(self, achieved_goals):
         for pos in achieved_goals:
             self.update_cell(pos[0], pos[1])
@@ -155,8 +159,8 @@ class DTSampler:
 		self.critic = critic
 
 		self.gamma = -1
-		self.beta = -1
-		self.sigma = 1
+		self.beta = 1 # q values
+		self.sigma = 0 # exploration
 
 		self.device = device
 		self.num_seed_steps = 2000	 # TODO init this from config later
@@ -215,9 +219,13 @@ class DTSampler:
 				
 	def get_q_values(self,goal_t):
 		goal = goal_t.detach().cpu().numpy()
+		obs_np = self.eval_env.reset()
+		self.eval_env.wrapped_env.set_xy(goal)
+		pos_xy_np = self.eval_env.wrapped_env.get_xy()
+		obs_np[:2] = pos_xy_np[:]
+		obs_np[6:8] = pos_xy_np[:]
 		with torch.no_grad():
-			obs = self.eval_env.reset(goal=goal)
-			obs_t = torch.tensor(obs, device = "cuda", dtype = torch.float32)
+			obs_t = torch.tensor(obs_np, device = "cuda", dtype = torch.float32)
 			dist = self.agent.actor(obs_t)
 			action = dist.rsample()
 
@@ -230,7 +238,8 @@ class DTSampler:
 			return q1,q2
 		else: 
 			return torch.tensor([0], device = "cuda", dtype=torch.float32), torch.tensor([0], device = "cuda", dtype=torch.float32) #TODO zero is no go, either average the other rewards or pull the calculation of q_vals to start
-		
+	def get_dir_of_agent(self, goal_t):
+		goal = goal_t.detach().cpu().numpy()
 	def calculate_exploration_value(self, init_pos, curr_pos):
 		epsilon = 1e-10  # Small value to prevent division by zero
 		if type(init_pos) is torch.Tensor:
@@ -327,15 +336,12 @@ class DTSampler:
 
 		self.latest_achieved 	= np.array([achieved_goals])
 		self.latest_rtgs 		= np.array([rtgs])
-		# if episode % 10 == 0:
-		# 	self.distance_map.convolute_matrix()
-		# achieved_goalss, rtgss = self.best_trajectories.add(achieved_goals,rtgs)
-		# rand_ind = random.randint(0, len(self.best_trajectories.heap)-1)
-		# for i in range(len(achieved_goalss)):
+
+		self.max_achieved_reward = max(max(rewards),self.max_achieved_reward)
+		self.latest_qs = q_values
 		self.train_single_trajectory(achieved_goals, rtgs, min_max_val_dict)
    		
-		self.max_achieved_reward = max(max(rtgs),self.max_achieved_reward)
-		self.max_rewards_so_far.append(self.max_achieved_reward)
+		self.max_rewards_so_far.append(max(rewards))
 		self.residual_goals_debug = []
 
 	def gradient_loss(self, predicted_goal, smoothed_matrix):
@@ -399,11 +405,11 @@ class DTSampler:
 				# Calculate direction loss
 				current_state = achieved_goals_t[0, best_state_index]
 
-				dir_loss 						= direction_loss(predicted_goal_t, temp_achieved[0,-1], gradient_x, gradient_y)
-				rtg_pred_loss  					= torch.nn.L1Loss()(goal_val_t, expected_val.unsqueeze(0))
+				# dir_loss 						= direction_loss(predicted_goal_t, temp_achieved[0,-1], gradient_x, gradient_y)
+				rtg_pred_loss  					= torch.nn.L1Loss()(goal_val_t + predicted_return, expected_val.unsqueeze(0))
 
 				# Calculate total loss
-				total_loss = dir_loss + rtg_pred_loss #- goal_val_t
+				total_loss = rtg_pred_loss# - goal_val_t 
 
 				# Optimization step
 				self.state_optimizer.zero_grad()
@@ -435,7 +441,7 @@ class DTSampler:
 			# goal_t = self.generate_goal(episode_observes, rtgs[0] + self.return_to_add )
 			goal =  goal_t.detach().cpu().numpy()
 			self.latest_desired_goal = goal
-
+			self.distance_map.update_cell_by(goal_t[0],goal_t[1],10)
 			return goal
 		else:
 			episode_observes = np.array([self.eval_env.convert_obs_to_dict(episode_observes[i])["achieved_goal"] for i in range(len(episode_observes))])
@@ -453,19 +459,36 @@ class DTSampler:
    
 			self.latest_desired_goal = goal
 			self.residual_goals_debug.append(goal)
-			
+			self.distance_map.update_cell_by(goal_t[0],goal_t[1],10)
+
 			return goal
 
 
-	def generate_goal(self,achieved_goals,rtgs):
+	def generate_goal(self, achieved_goals, rtgs):
 		actions = torch.zeros((1, achieved_goals.shape[0], 2), device="cuda", dtype=torch.float32)
 		timesteps = torch.arange(achieved_goals.shape[0], device="cuda").unsqueeze(0)  # Adding batch dimension
 		achieved_goals = torch.tensor(achieved_goals, device="cuda", dtype=torch.float32)
 
 		rtgs = torch.tensor(rtgs, device = "cuda", dtype = torch.float32).unsqueeze(0)
-		desired_goal = self.dt.get_state(achieved_goals, actions, None, rtgs, timesteps)
-  
-		return desired_goal
+		while True:
+			desired_goal = self.dt.get_state(achieved_goals, actions, None, rtgs, timesteps)
+			loss = 0
+			if (desired_goal[0] < self.limits[0][0]):
+				loss += (self.limits[0][0] - desired_goal[0])**2
+			if (desired_goal[0] > self.limits[0][1]):
+				loss += (desired_goal[0] - self.limits[0][1])**2
+			if (desired_goal[1] < self.limits[1][0]):
+				loss += (self.limits[1][0] - desired_goal[1])**2
+			if (desired_goal[1] > self.limits[1][1]):
+				loss += (desired_goal[1] - self.limits[1][1])**2
+			if loss > 0:
+				self.state_optimizer.zero_grad()
+				loss.backward(retain_graph=True)  # retain the computation graph
+				torch.nn.utils.clip_grad_norm_(self.dt.parameters(), 0.25)
+				self.state_optimizer.step()
+			else:
+				return desired_goal.detach()  # return the desired goal if within limits
+
 
 
 
@@ -511,13 +534,13 @@ class DTSampler:
 		pos = (i // fig_shape[1], i % fig_shape[1])
 		self.visualize_max_rewards(axs[pos[0]][pos[1]])
 
-		i += 1
-		pos = (i // fig_shape[1], i % fig_shape[1])
-		self.visualize_best_trajectories(axs[pos[0]][pos[1]], "Trajectories 1")
-
 		# i += 1
 		# pos = (i // fig_shape[1], i % fig_shape[1])
-		# self.visualize_best_trajectories(axs[pos[0]][pos[1]], "Trajectories 2")
+		# self.visualize_best_trajectories(axs[pos[0]][pos[1]], "Trajectories 1")
+
+		i += 1
+		pos = (i // fig_shape[1], i % fig_shape[1])
+		self.visualize_trajectories_on_qs(axs[pos[0]][pos[1]])
 
 		plt.savefig(
 			f'{self.video_recorder.debug_dir}/combined_heatmaps_episode_{str(self.episode)}.jpg'
@@ -625,6 +648,36 @@ class DTSampler:
 		# t_normalized = (t - t.min()) / (t.max() - t.min())
 		scatter = ax.scatter(x, y, c=rtgs, cmap='viridis', edgecolor='k')
 		ax.scatter(self.latest_desired_goal[0], self.latest_desired_goal[1], color='red', marker='x', s=100, label='Latest Desired Goal')
+		ax.scatter(self.latest_desired_goal[0], self.latest_desired_goal[1], color='red', marker='x', s=100, label='Latest Desired Goal')
+  
+		if len(self.residual_goals_debug):
+			residual_goals_np = np.array(self.residual_goals_debug)
+			res_x = residual_goals_np[:,0]
+			res_y = residual_goals_np[:,1]
+			ax.scatter(res_x, res_y, color='blue', marker='x', s=100, label='Latest Desired Goal')
+		cbar = ax.figure.colorbar(scatter, ax=ax, label='Time step')
+
+		ax.set_xlabel('X Position')
+		ax.set_ylabel('Y Position')
+		ax.set_title(title)
+		ax.set_xlim(-2, 10)
+		ax.set_ylim(-2, 10)
+		ax.set_aspect('equal')  # Ensuring equal aspect ratio
+		ax.grid(True)
+
+	def visualize_trajectories_on_qs(self, ax, title='Position Over Qs'):
+		x = self.latest_achieved[0,:, 0]
+		y = self.latest_achieved[0,:, 1]
+		rtgs = self.latest_qs
+		if self.residual_goals_debug:
+			residual_goals_np = np.array(self.residual_goals_debug)
+			res_x = residual_goals_np[:,0]
+			res_y = residual_goals_np[:,1]
+			ax.scatter(res_x, res_y, color='blue', marker='x', s=100, label='Latest Desired Goal')
+  
+		# Normalize time values to [0, 1] for color mapping
+		# t_normalized = (t - t.min()) / (t.max() - t.min())
+		scatter = ax.scatter(x, y, c=rtgs, cmap='viridis', edgecolor='k')
 		ax.scatter(self.latest_desired_goal[0], self.latest_desired_goal[1], color='red', marker='x', s=100, label='Latest Desired Goal')
   
 		if len(self.residual_goals_debug):
