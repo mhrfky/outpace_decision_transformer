@@ -125,7 +125,8 @@ def get_gradient_at_position(gradient_x, gradient_y, position):
 
 def rescale_array(tensor, old_min, old_max, new_min =-1, new_max = 1):
     # rescaled_tensor = (tensor - old_min) / (old_max - old_min) * (new_max - new_min) + new_min
-    return tensor
+    # return rescaled_tensor
+	return tensor
 
 def goal_distance(goal_a, goal_b):
 	return np.linalg.norm(goal_a - goal_b, ord=2)
@@ -160,7 +161,7 @@ class DTSampler:
 
 		self.gamma = -1
 		self.beta = 1 # q values
-		self.sigma = 0 # exploration
+		self.sigma = 1 # exploration
 
 		self.device = device
 		self.num_seed_steps = 2000	 # TODO init this from config later
@@ -351,25 +352,34 @@ class DTSampler:
 		loss = torch.norm(gradient_at_position)  # Higher gradient norm results in higher loss
 		return loss
 
+	def calculate_information_gain_rewards(self, achieved_goals, model):
+		information_gain_rewards = []
+		for pos in achieved_goals:
+			uncertainty = self.compute_uncertainty(pos, model)
+			information_gain_rewards.append(uncertainty)
+		return torch.tensor(information_gain_rewards).to(self.device)
+
+	def compute_uncertainty(self, state, model):
+		state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(self.device)
+		with torch.no_grad():
+			mean, logvar = model.get_state(state_tensor, torch.zeros_like(state_tensor), None, torch.zeros_like(state_tensor), torch.zeros(state_tensor.size(0), dtype=torch.long).to(self.device))
+			uncertainty = logvar.exp().mean().item()  # Higher uncertainty means more information gain potential
+		return uncertainty
 
 	def train_single_trajectory(self, achieved_goals_t, rtgs, min_max_val_dict):
 		goals_predicted_debug = []
 
-		# Ensure input tensors are on the correct device and type
 		achieved_goals_t = torch.tensor([achieved_goals_t], device="cuda", dtype=torch.float32)
 		rtgs = torch.tensor([rtgs], device="cuda", dtype=torch.float32)
 
-		# Placeholder for actions and sequence of timesteps
 		actions = torch.zeros((1, achieved_goals_t.size(1), 2), device="cuda", dtype=torch.float32)
-		timesteps = torch.arange(achieved_goals_t.size(1), device="cuda").unsqueeze(0)  # Adding batch dimension
+		timesteps = torch.arange(achieved_goals_t.size(1), device="cuda").unsqueeze(0)
 
-		# Get smoothed visitation matrix and calculate its gradient
 		smoothed_matrix = gaussian_smoothing(self.distance_map.visitation_matrix)
 		smoothed_matrix = torch.tensor(smoothed_matrix, dtype=torch.float32, device="cuda", requires_grad=True)
 		gradient_x, gradient_y = calculate_gradient(smoothed_matrix)
 
 		for i in range(1, achieved_goals_t.shape[1] - 1):
-			# Isolate the sub-sequence up to the current step
 			temp_achieved = achieved_goals_t[:, :i]
 			temp_actions = actions[:, :i]
 			temp_timesteps = timesteps[:, :i]
@@ -378,11 +388,13 @@ class DTSampler:
 			temp_rtg -= rtgs[0, i + 1]
 			temp_rtg = temp_rtg.unsqueeze(-1)
 
-			# Forward pass to predict the next goal
-			predicted_goal_t, _, predicted_return = self.dt.forward(temp_achieved, temp_actions, None, temp_rtg, temp_timesteps)
-			predicted_goal_t = predicted_goal_t[0, -1]
-			predicted_goal_np = predicted_goal_t.detach().cpu().numpy()
-			predicted_return = predicted_return[0, -1]
+			predicted_goal_mean, predicted_goal_logvar, predicted_return, _ = self.dt.forward(temp_achieved, temp_actions, None, temp_rtg, temp_timesteps)
+			predicted_goal_mean = predicted_goal_mean[0, -1]
+			predicted_goal_logvar = predicted_goal_logvar[0, -1]
+			predicted_goal_std = torch.exp(0.5 * predicted_goal_logvar)
+			predicted_goal_distribution = torch.distributions.Normal(predicted_goal_mean, predicted_goal_std)
+
+			predicted_goal_t = predicted_goal_distribution.rsample()
 			goals_predicted_debug.append(predicted_goal_t.detach().cpu().numpy())
 
 			if i < achieved_goals_t.shape[1] - 1:
@@ -402,18 +414,18 @@ class DTSampler:
 				goal_val_t = self.gamma * aim_val_t + q_val_t * self.beta + self.sigma * exploration_val
 				best_state_index = torch.argmin(temp_rtg[0])
 
-				# Calculate direction loss
 				current_state = achieved_goals_t[0, best_state_index]
 
-				# dir_loss 						= direction_loss(predicted_goal_t, temp_achieved[0,-1], gradient_x, gradient_y)
-				rtg_pred_loss  					= torch.nn.L1Loss()(goal_val_t + predicted_return, expected_val.unsqueeze(0))
+				rtg_pred_loss = torch.nn.L1Loss()(goal_val_t, expected_val.unsqueeze(0))
 
-				# Calculate total loss
-				total_loss = rtg_pred_loss# - goal_val_t 
+				# Calculate information gain reward for all trajectories
+				# info_gain_rewards = self.calculate_information_gain_rewards(temp_achieved[0], self.dt)
 
-				# Optimization step
+				# Combine losses
+				total_loss = rtg_pred_loss #+ info_gain_rewards.mean()
+
 				self.state_optimizer.zero_grad()
-				total_loss.backward()
+				total_loss.backward(retain_graph=True)
 				torch.nn.utils.clip_grad_norm_(self.dt.parameters(), 0.25)
 				self.state_optimizer.step()
 
@@ -421,7 +433,8 @@ class DTSampler:
 		self.visualize_value_heatmaps_for_debug(goals_predicted_debug_np)
 		self.distance_map.update_upon_trajectory(achieved_goals=achieved_goals_t[0])
 
-		return total_loss.item()  # Return the last computed loss
+		return total_loss.item()
+
 
 
 
@@ -471,7 +484,7 @@ class DTSampler:
 
 		rtgs = torch.tensor(rtgs, device = "cuda", dtype = torch.float32).unsqueeze(0)
 		while True:
-			desired_goal = self.dt.get_state(achieved_goals, actions, None, rtgs, timesteps)
+			desired_goal = self.dt.get_state(achieved_goals, actions, None, rtgs, timesteps)[0] # TODO set this right this is just patchwork
 			loss = 0
 			if (desired_goal[0] < self.limits[0][0]):
 				loss += (self.limits[0][0] - desired_goal[0])**2
