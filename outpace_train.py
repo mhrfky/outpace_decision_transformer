@@ -1076,7 +1076,7 @@ class Workspace(object):
     def meta_nml_run_init(self):
         if self.cfg.use_meta_nml:                
             if self.cfg.env in ['AntMazeSmall-v0', "PointUMaze-v0"]:  
-                final_goal_states = np.tile(np.array([0., 8.]), (self.cfg.aim_num_precollect_init_state,1))
+                final_goal_states = np.tile(np.array([0., 8.]), (100,1))
                 final_goal_states += np.random.normal(loc=np.zeros_like(final_goal_states), scale=0.5*np.ones_like(final_goal_states))
             elif self.cfg.env  == "PointSpiralMaze-v0":
                 final_goal_states = np.tile(np.array([8., -8.]), (self.cfg.aim_num_precollect_init_state,1))

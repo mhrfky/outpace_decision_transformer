@@ -15,7 +15,20 @@ from video import VideoRecorder
 import heapq
 from hgg.utils import MoveOntheLastPartLoss
 from scipy.ndimage import convolve
-    
+from hgg.utils import BayesianNN
+import torch.optim as optim
+class StatesBuffer:
+    def __init__(self, max_size=5000):
+        self.list = np.array([[0, 0]])
+        self.max_size = max_size
+
+    def insert(self, trajectory):
+        self.list = np.vstack((trajectory, self.list))[:self.max_size]
+
+    def sample(self, batch_size=64):
+        sampled_elements = self.list[np.random.choice(self.list.shape[0], batch_size, replace=False)]
+        return sampled_elements
+
 class TrajectoryHeap:
 	class Trajectory:
 		def __init__(self, trajectory, rtgs) -> None:
@@ -40,88 +53,6 @@ class TrajectoryHeap:
 		trajectories = [traj.trajectory for traj in self.heap]
 		rtgs_s = [traj.rtgs for traj in self.heap]
 		return trajectories, rtgs_s
-	
-class TimestepDistanceMap:
-    def __init__(self, lower_boundary, upper_boundary):
-        self.lower_boundary = lower_boundary
-        self.upper_boundary = upper_boundary
-        number_of_rows = self.upper_boundary[0] - self.lower_boundary[0]
-        number_of_columns = self.upper_boundary[1] - self.lower_boundary[1]
-        self.visitation_matrix = torch.zeros((number_of_rows + 1, number_of_columns + 1), dtype=torch.float32, requires_grad=True).to('cuda')
-
-    def update_cell(self, x, y):
-        x = math.floor(x - self.lower_boundary[0])
-        y = math.floor(y - self.lower_boundary[1])
-        with torch.no_grad():
-            self.visitation_matrix[x, y] += 1
-    def update_cell_by(self, x, y,val):
-        x = math.floor(x - self.lower_boundary[0])
-        y = math.floor(y - self.lower_boundary[1])
-        with torch.no_grad():
-            self.visitation_matrix[x, y] += val
-    def update_upon_trajectory(self, achieved_goals):
-        for pos in achieved_goals:
-            self.update_cell(pos[0], pos[1])
-
-    def get_val(self, x, y):
-        x = math.floor(x - self.lower_boundary[0])
-        y = math.floor(y - self.lower_boundary[1])
-        return self.visitation_matrix[x, y]
-
-    def get_mean_of_surrounding(self, x, y):
-        x = math.floor(x - self.lower_boundary[0])
-        y = math.floor(y - self.lower_boundary[1])
-
-        # Define the bounds of the submatrix
-        x_min = max(0, x - 1)
-        x_max = min(self.visitation_matrix.shape[0], x + 2)
-        y_min = max(0, y - 1)
-        y_max = min(self.visitation_matrix.shape[1], y + 2)
-
-        # Extract the submatrix
-        submatrix = self.visitation_matrix[x_min:x_max, y_min:y_max]
-
-        # Calculate the mean of the submatrix
-        mean_value = torch.mean(submatrix)
-
-        return mean_value
-
-    def get_smoothed_visitation_matrix(self):
-        return gaussian_smoothing(self.visitation_matrix)
-
-def gaussian_smoothing(matrix, kernel_size=5, sigma=1.0):
-    kernel = torch.tensor([[1 / (2 * math.pi * sigma ** 2) * math.exp(-(x ** 2 + y ** 2) / (2 * sigma ** 2))
-                            for x in range(-kernel_size // 2 + 1, kernel_size // 2 + 1)]
-                           for y in range(-kernel_size // 2 + 1, kernel_size // 2 + 1)], dtype=torch.float32)
-    kernel = kernel / kernel.sum()  # Normalize the kernel
-
-    matrix = matrix.unsqueeze(0).unsqueeze(0)  # Add batch and channel dimensions
-    smoothed_matrix = F.conv2d(matrix, kernel.unsqueeze(0).unsqueeze(0).to(matrix.device), padding=kernel_size // 2)
-    return smoothed_matrix.squeeze()
-
-def calculate_gradient(matrix):
-    matrix.requires_grad_(True)
-    gradient_x, gradient_y = torch.gradient(matrix)
-    return gradient_x, gradient_y
-
-def direction_loss(predicted_goal, current_state, gradient_x, gradient_y):
-    predicted_direction = predicted_goal - current_state
-    predicted_direction = predicted_direction / (torch.norm(predicted_direction) + 1e-8)
-
-    x, y = current_state.long()
-    gradient_direction = torch.tensor([gradient_x[x, y], gradient_y[x, y]], device=predicted_goal.device)
-    gradient_direction = gradient_direction / (torch.norm(gradient_direction) + 1e-8)
-
-    loss = torch.nn.functional.mse_loss(predicted_direction, gradient_direction)
-    return loss
-
-
-
-
-def get_gradient_at_position(gradient_x, gradient_y, position):
-    x, y = position
-    return gradient_x[x, y], gradient_y[x, y]
-
 
 def rescale_array(tensor, old_min, old_max, new_min =-1, new_max = 1):
     # rescaled_tensor = (tensor - old_min) / (old_max - old_min) * (new_max - new_min) + new_min
@@ -160,7 +91,7 @@ class DTSampler:
 
 		self.gamma = -1
 		self.beta = 1 # q values
-		self.sigma = 0 # exploration
+		self.sigma = 1 # exploration
 
 		self.device = device
 		self.num_seed_steps = 2000	 # TODO init this from config later
@@ -194,7 +125,11 @@ class DTSampler:
 		self.best_trajectories =  TrajectoryHeap(max_size=5)
 		self.number_of_trajectories_per_episode = 2
 		self.dumb_prevention_loss = MoveOntheLastPartLoss(threshold=4)
-		self.distance_map = TimestepDistanceMap([-2,-2],[10,10])
+
+		self.states_buffer = StatesBuffer()
+		self.bnn_model = BayesianNN().to(device)
+		self.optimizer = optim.Adam(self.bnn_model.parameters(), lr=0.001)
+
 	def reward_to_rtg(self,rewards):
 		return rewards - rewards[-1]
 
@@ -238,8 +173,7 @@ class DTSampler:
 			return q1,q2
 		else: 
 			return torch.tensor([0], device = "cuda", dtype=torch.float32), torch.tensor([0], device = "cuda", dtype=torch.float32) #TODO zero is no go, either average the other rewards or pull the calculation of q_vals to start
-	def get_dir_of_agent(self, goal_t):
-		goal = goal_t.detach().cpu().numpy()
+
 	def calculate_exploration_value(self, init_pos, curr_pos):
 		epsilon = 1e-10  # Small value to prevent division by zero
 		if type(init_pos) is torch.Tensor:
@@ -257,12 +191,6 @@ class DTSampler:
 			# value = numerator / denominator
 			return value
 	 
-
-	def shorten_trajectory(self, achieved_goals, rtgs):
-		achieved_goals = achieved_goals[::3]# list of reduced ts		)
-		rtgs = rtgs[::3]
-  
-		return achieved_goals, rtgs
 
 	def get_max_min_rewards(self, init_state):
 		q1_t, q2_t = self.get_q_values(torch.tensor(self.final_goal, device = "cuda", dtype = torch.float32))
@@ -314,8 +242,32 @@ class DTSampler:
 		q_values			=	rescale_array(qs, val_dict['min_q'], val_dict["max_q"])
   
 		return achieved_values, exploration_values, q_values, val_dict
+	
+	def get_positives(self,sample_size = 32):
+		positives = np.tile(np.array([self.final_goal], dtype = np.float64), (sample_size,1))
+		positives += np.random.normal(loc=np.zeros_like(positives), scale=0.5*np.ones_like(positives))
+		return positives
+	
+	def train_bnn(self):
+		negatives = self.states_buffer.sample()
+		positives = self.get_positives()
 
-  
+		neg_labels = np.zeros(len(negatives))
+		pos_labels = np.ones(len(positives))
+
+		X_train = np.concatenate((negatives, positives), axis=0)
+		y_train = np.concatenate((neg_labels, pos_labels), axis=0)
+
+		X_train = torch.tensor(X_train, dtype=torch.float32).to(self.device)
+		y_train = torch.tensor(y_train, dtype=torch.float32).to(self.device)
+
+		self.bnn_model.train()
+		self.optimizer.zero_grad()
+		outputs = self.bnn_model(X_train).squeeze()
+		loss = F.binary_cross_entropy(outputs, y_train)
+		loss.backward()
+		self.optimizer.step()
+
 	def update(self, step, episode, achieved_goals, qs):
 		
 		
@@ -333,43 +285,39 @@ class DTSampler:
 
 		rtgs = self.reward_to_rtg(rewards)
 
-
 		self.latest_achieved 	= np.array([achieved_goals])
 		self.latest_rtgs 		= np.array([rtgs])
-
+		self.states_buffer.insert(achieved_goals)
 		self.max_achieved_reward = max(max(rewards),self.max_achieved_reward)
 		self.latest_qs = q_values
 		self.train_single_trajectory(achieved_goals, rtgs, min_max_val_dict)
    		
 		self.max_rewards_so_far.append(max(rewards))
 		self.residual_goals_debug = []
+		# self.train_bnn()
 
-	def gradient_loss(self, predicted_goal, smoothed_matrix):
-		x = math.floor(predicted_goal[0].item() - self.distance_map.lower_boundary[0])
-		y = math.floor(predicted_goal[1].item() - self.distance_map.lower_boundary[1])
-		gradient_at_position = calculate_gradient(smoothed_matrix, (x, y))
-		loss = torch.norm(gradient_at_position)  # Higher gradient norm results in higher loss
-		return loss
 
+	def calculate_information_gain(self, achieved_goals):
+		self.bnn_model.eval()
+		with torch.no_grad():
+			uncertainties = []
+			for goal in achieved_goals:
+				goal_tensor = torch.tensor(goal, dtype=torch.float32).unsqueeze(0).to(self.device)
+				uncertainty = self.bnn_model(goal_tensor).squeeze().item()
+				uncertainties.append(uncertainty)
+		return np.array(uncertainties)
 
 	def train_single_trajectory(self, achieved_goals_t, rtgs, min_max_val_dict):
 		goals_predicted_debug = []
 
-		# Ensure input tensors are on the correct device and type
 		achieved_goals_t = torch.tensor([achieved_goals_t], device="cuda", dtype=torch.float32)
 		rtgs = torch.tensor([rtgs], device="cuda", dtype=torch.float32)
 
-		# Placeholder for actions and sequence of timesteps
 		actions = torch.zeros((1, achieved_goals_t.size(1), 2), device="cuda", dtype=torch.float32)
-		timesteps = torch.arange(achieved_goals_t.size(1), device="cuda").unsqueeze(0)  # Adding batch dimension
+		timesteps = torch.arange(achieved_goals_t.size(1), device="cuda").unsqueeze(0)
 
-		# Get smoothed visitation matrix and calculate its gradient
-		smoothed_matrix = gaussian_smoothing(self.distance_map.visitation_matrix)
-		smoothed_matrix = torch.tensor(smoothed_matrix, dtype=torch.float32, device="cuda", requires_grad=True)
-		gradient_x, gradient_y = calculate_gradient(smoothed_matrix)
 
 		for i in range(1, achieved_goals_t.shape[1] - 1):
-			# Isolate the sub-sequence up to the current step
 			temp_achieved = achieved_goals_t[:, :i]
 			temp_actions = actions[:, :i]
 			temp_timesteps = timesteps[:, :i]
@@ -378,7 +326,6 @@ class DTSampler:
 			temp_rtg -= rtgs[0, i + 1]
 			temp_rtg = temp_rtg.unsqueeze(-1)
 
-			# Forward pass to predict the next goal
 			predicted_goal_t, _, predicted_return = self.dt.forward(temp_achieved, temp_actions, None, temp_rtg, temp_timesteps)
 			predicted_goal_t = predicted_goal_t[0, -1]
 			predicted_goal_np = predicted_goal_t.detach().cpu().numpy()
@@ -400,18 +347,16 @@ class DTSampler:
 				q_val_t = rescale_array(q_val_t, min_max_val_dict["min_q"], min_max_val_dict["max_q"])
 
 				goal_val_t = self.gamma * aim_val_t + q_val_t * self.beta + self.sigma * exploration_val
-				best_state_index = torch.argmin(temp_rtg[0])
 
-				# Calculate direction loss
-				current_state = achieved_goals_t[0, best_state_index]
-
-				# dir_loss 						= direction_loss(predicted_goal_t, temp_achieved[0,-1], gradient_x, gradient_y)
-				rtg_pred_loss  					= torch.nn.L1Loss()(goal_val_t + predicted_return, expected_val.unsqueeze(0))
+				rtg_pred_loss = torch.nn.L1Loss()(goal_val_t + predicted_return, expected_val.unsqueeze(0))
+				
+				# Calculate Information Gain Reward
+				# info_gain_rewards = self.calculate_information_gain(temp_achieved[0].detach().cpu().numpy())
+				# info_gain_loss = torch.tensor(info_gain_rewards.mean(), dtype=torch.float32, device=self.device)
 
 				# Calculate total loss
-				total_loss = rtg_pred_loss# - goal_val_t 
+				total_loss = rtg_pred_loss #- info_gain_loss
 
-				# Optimization step
 				self.state_optimizer.zero_grad()
 				total_loss.backward()
 				torch.nn.utils.clip_grad_norm_(self.dt.parameters(), 0.25)
@@ -419,19 +364,9 @@ class DTSampler:
 
 		goals_predicted_debug_np = np.array(goals_predicted_debug)
 		self.visualize_value_heatmaps_for_debug(goals_predicted_debug_np)
-		self.distance_map.update_upon_trajectory(achieved_goals=achieved_goals_t[0])
 
-		return total_loss.item()  # Return the last computed loss
+		return total_loss.item()
 
-
-
-	def chi_distance_loss(self, a, b, demanded_dist):
-		dist = torch.sqrt(torch.sum((a - b) ** 2))
-		loss = (demanded_dist - dist) ** 2
-		return loss
-
-	
-		
 	def sample(self, episode_observes = None, qs = None):
 		if episode_observes is None or qs is None:
 			if self.latest_achieved is None:
@@ -441,7 +376,6 @@ class DTSampler:
 			# goal_t = self.generate_goal(episode_observes, rtgs[0] + self.return_to_add )
 			goal =  goal_t.detach().cpu().numpy()
 			self.latest_desired_goal = goal
-			self.distance_map.update_cell_by(goal_t[0],goal_t[1],10)
 			return goal
 		else:
 			episode_observes = np.array([self.eval_env.convert_obs_to_dict(episode_observes[i])["achieved_goal"] for i in range(len(episode_observes))])
@@ -459,7 +393,6 @@ class DTSampler:
    
 			self.latest_desired_goal = goal
 			self.residual_goals_debug.append(goal)
-			self.distance_map.update_cell_by(goal_t[0],goal_t[1],10)
 
 			return goal
 
@@ -489,7 +422,15 @@ class DTSampler:
 			else:
 				return desired_goal.detach()  # return the desired goal if within limits
 
-
+###############################################################################################################################################################################################################
+###############################################################################################################################################################################################################
+###############################################################################################################################################################################################################
+###############################################################################################################################################################################################################
+###############################################################################################################################################################################################################
+###############################################################################################################################################################################################################
+###############################################################################################################################################################################################################
+###############################################################################################################################################################################################################
+###############################################################################################################################################################################################################
 
 
 	def visualize_value_heatmaps_for_debug(self, goals_predicted_during_training):
@@ -505,13 +446,11 @@ class DTSampler:
 		aim_pos_val = np.hstack((combined_heatmap, self.gamma * achieved_values))
 		expl_pos_val = np.hstack((combined_heatmap, self.sigma * exploration_values))
 		combined_pos_val = np.hstack((combined_heatmap, (self.beta * q_values +  self.gamma * achieved_values + self.sigma * exploration_values)))
-		distance_matrix = np.hstack((combined_heatmap, self.distance_map.visitation_matrix.clone().detach().cpu().numpy().reshape(combined_heatmap.shape[0], 1)))
 		plot_dict = {}
 		plot_dict["Q Heatmap"] = q_pos_val
 		plot_dict["Aim Heatmap"]  = aim_pos_val
 		plot_dict["Explore Heatmap"]  = expl_pos_val
 		plot_dict["Combined Heatmap"] = combined_pos_val
-		plot_dict["Timestep Distance Heatmap"] = distance_matrix
   		# for heatmap in plot_dict.values():
 		# 	combined_heatmap[:, 2] += heatmap[:, 2]
 
