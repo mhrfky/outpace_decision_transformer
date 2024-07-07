@@ -1,7 +1,8 @@
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
-
+import torch.optim as optim
+from torch.distributions.normal import Normal
 
 class MoveOntheLastPartLoss(nn.Module):
     def __init__(self, threshold):
@@ -31,4 +32,34 @@ class MoveOntheLastPartLoss(nn.Module):
         # loss = (weight_denominator * number_of_effected_squared - 1)/ (epsilon + dist_denominator)
         loss = euclidean_distances * weight
         return sum(below_threshold)
+
+class BayesianLinear(nn.Module):
+    def __init__(self, in_features, out_features):
+        super(BayesianLinear, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        
+        self.weight_mu = nn.Parameter(torch.Tensor(out_features, in_features).normal_(0, 0.1))
+        self.weight_rho = nn.Parameter(torch.Tensor(out_features, in_features).uniform_(-3, -2))
+        self.bias_mu = nn.Parameter(torch.Tensor(out_features).normal_(0, 0.1))
+        self.bias_rho = nn.Parameter(torch.Tensor(out_features).uniform_(-3, -2))
+        
+    def forward(self, x):
+        weight_epsilon = Normal(0, 1).sample(self.weight_mu.size()).to(x.device)
+        bias_epsilon = Normal(0, 1).sample(self.bias_mu.size()).to(x.device)
+        
+        weight = self.weight_mu + torch.log1p(torch.exp(self.weight_rho)) * weight_epsilon
+        bias = self.bias_mu + torch.log1p(torch.exp(self.bias_rho)) * bias_epsilon
+        
+        return nn.functional.linear(x, weight, bias)
+
+class BayesianNN(nn.Module):
+    def __init__(self, input_dim=2):
+        super(BayesianNN, self).__init__()
+        self.fc1 = BayesianLinear(input_dim, 128)
+        self.fc2 = BayesianLinear(128, 1)
     
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x

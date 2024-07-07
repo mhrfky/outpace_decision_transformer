@@ -15,7 +15,19 @@ from video import VideoRecorder
 import heapq
 from hgg.utils import MoveOntheLastPartLoss
 from scipy.ndimage import convolve
-    
+from hgg.utils import BayesianNN
+import torch.optim as optim
+class StatesBuffer:
+    def __init__(self, max_size=5000):
+        self.list = np.array([[0, 0]])
+        self.max_size = max_size
+
+    def insert(self, trajectory):
+        self.list = np.vstack((trajectory, self.list))[:self.max_size]
+
+    def sample(self, batch_size=64):
+        sampled_elements = self.list[np.random.choice(self.list.shape[0], batch_size, replace=False)]
+        return sampled_elements
 class TrajectoryHeap:
 	class Trajectory:
 		def __init__(self, trajectory, rtgs) -> None:
@@ -196,6 +208,10 @@ class DTSampler:
 		self.number_of_trajectories_per_episode = 2
 		self.dumb_prevention_loss = MoveOntheLastPartLoss(threshold=4)
 		self.distance_map = TimestepDistanceMap([-2,-2],[10,10])
+
+		self.states_buffer = StatesBuffer()
+		self.bnn_model = BayesianNN().to(device)
+		self.optimizer = optim.Adam(self.bnn_model.parameters(), lr=0.001)
 	def reward_to_rtg(self,rewards):
 		return rewards - rewards[-1]
 
@@ -316,7 +332,33 @@ class DTSampler:
   
 		return achieved_values, exploration_values, q_values, val_dict
 
-  
+	def get_positives(self,sample_size = 32):
+		positives = np.tile(np.array([self.final_goal], dtype = np.float64), (sample_size,1))
+		positives += np.random.normal(loc=np.zeros_like(positives), scale=0.5*np.ones_like(positives))
+		return positives
+
+	def train_bnn(self):
+		negatives = self.states_buffer.sample()
+		positives = self.get_positives()
+
+		neg_labels = np.zeros(len(negatives))
+		pos_labels = np.ones(len(positives))
+
+		x_train = np.concatenate((negatives, positives), axis=0)
+		y_train = np.concatenate((neg_labels, pos_labels), axis=0)
+
+		x_train = torch.tensor(x_train, dtype=torch.float32).to(self.device)
+		y_train = torch.tensor(y_train, dtype=torch.float32).to(self.device)
+
+		self.bnn_model.train()
+		self.optimizer.zero_grad()
+		outputs = self.bnn_model(x_train).squeeze()
+		outputs = torch.sigmoid(outputs)
+
+		loss = F.binary_cross_entropy(outputs, y_train)
+		loss.backward()
+		self.optimizer.step()
+
 	def update(self, step, episode, achieved_goals, qs):
 		
 		
@@ -338,33 +380,34 @@ class DTSampler:
 		self.latest_achieved 	= np.array([achieved_goals])
 		self.latest_rtgs 		= np.array([rtgs])
 
+		self.states_buffer.insert(achieved_goals)
+
 		self.max_achieved_reward = max(max(rewards),self.max_achieved_reward)
 		self.latest_qs = q_values
+		self.train_bnn()
 		self.train_single_trajectory(achieved_goals, rtgs, min_max_val_dict)
    		
 		self.max_rewards_so_far.append(max(rewards))
 		self.residual_goals_debug = []
 
-	def gradient_loss(self, predicted_goal, smoothed_matrix):
-		x = math.floor(predicted_goal[0].item() - self.distance_map.lower_boundary[0])
-		y = math.floor(predicted_goal[1].item() - self.distance_map.lower_boundary[1])
-		gradient_at_position = calculate_gradient(smoothed_matrix, (x, y))
-		loss = torch.norm(gradient_at_position)  # Higher gradient norm results in higher loss
-		return loss
+	
+	def calculate_information_gain(self, state):
+		self.bnn_model.eval()
+		if type(state) is torch.Tensor:
 
-	def calculate_information_gain_rewards(self, achieved_goals, model):
-		information_gain_rewards = []
-		for pos in achieved_goals:
-			uncertainty = self.compute_uncertainty(pos, model)
-			information_gain_rewards.append(uncertainty)
-		return torch.tensor(information_gain_rewards).to(self.device)
+			state_t = state
+			with torch.no_grad():
+				outputs = [self.bnn_model(state_t) for _ in range(10)]
+				uncertainty_t = torch.stack(outputs).std(0).mean()
+			return uncertainty_t
+		else:
+			
+			state_t = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(self.device)
 
-	def compute_uncertainty(self, state, model):
-		state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(self.device)
-		with torch.no_grad():
-			mean, logvar = model.get_state(state_tensor, torch.zeros_like(state_tensor), None, torch.zeros_like(state_tensor), torch.zeros(state_tensor.size(0), dtype=torch.long).to(self.device))
-			uncertainty = logvar.exp().mean().item()  # Higher uncertainty means more information gain potential
-		return uncertainty
+			with torch.no_grad():
+				outputs = [self.bnn_model(state_t) for _ in range(10)]
+				uncertainty_t = torch.stack(outputs).std(0).mean().item()
+			return uncertainty_t
 
 	def train_single_trajectory(self, achieved_goals_t, rtgs, min_max_val_dict):
 		goals_predicted_debug = []
@@ -375,9 +418,6 @@ class DTSampler:
 		actions = torch.zeros((1, achieved_goals_t.size(1), 2), device="cuda", dtype=torch.float32)
 		timesteps = torch.arange(achieved_goals_t.size(1), device="cuda").unsqueeze(0)
 
-		smoothed_matrix = gaussian_smoothing(self.distance_map.visitation_matrix)
-		smoothed_matrix = torch.tensor(smoothed_matrix, dtype=torch.float32, device="cuda", requires_grad=True)
-		gradient_x, gradient_y = calculate_gradient(smoothed_matrix)
 
 		for i in range(1, achieved_goals_t.shape[1] - 1):
 			temp_achieved = achieved_goals_t[:, :i]
@@ -416,13 +456,17 @@ class DTSampler:
 
 				current_state = achieved_goals_t[0, best_state_index]
 
-				rtg_pred_loss = torch.nn.L1Loss()(goal_val_t, expected_val.unsqueeze(0))
+				rtg_pred_loss = torch.nn.L1Loss()(goal_val_t + predicted_return, expected_val.unsqueeze(0))
 
-				# Calculate information gain reward for all trajectories
-				# info_gain_rewards = self.calculate_information_gain_rewards(temp_achieved[0], self.dt)
+				# Calculate Information Gain Reward
+				outputs = self.bnn_model(predicted_goal_t.unsqueeze(0))  # Get probability prediction
+				probability_pred = torch.sigmoid(outputs)
+				uncertainty_loss = torch.abs(probability_pred - 0.5).mean()  # Treat uncertainty as the difference from 0.5
+
+				# info_gain_loss = torch.tensor(info_gain_rewards.mean(), dtype=torch.float32, device=self.device)
 
 				# Combine losses
-				total_loss = rtg_pred_loss #+ info_gain_rewards.mean()
+				total_loss =  + uncertainty_loss
 
 				self.state_optimizer.zero_grad()
 				total_loss.backward(retain_graph=True)
@@ -431,17 +475,11 @@ class DTSampler:
 
 		goals_predicted_debug_np = np.array(goals_predicted_debug)
 		self.visualize_value_heatmaps_for_debug(goals_predicted_debug_np)
-		self.distance_map.update_upon_trajectory(achieved_goals=achieved_goals_t[0])
 
 		return total_loss.item()
 
 
 
-
-	def chi_distance_loss(self, a, b, demanded_dist):
-		dist = torch.sqrt(torch.sum((a - b) ** 2))
-		loss = (demanded_dist - dist) ** 2
-		return loss
 
 	
 		
@@ -502,7 +540,13 @@ class DTSampler:
 			else:
 				return desired_goal.detach()  # return the desired goal if within limits
 
-
+	def get_probabilities_over_trajectory(self, trajectory):
+		probabilities = np.array([])
+		for achieved_goal in trajectory:
+			output = self.bnn_model(torch.tensor(achieved_goal, device = "cuda", dtype = torch.float32))
+			probability = torch.sigmoid(output)
+			probabilities = np.append(probabilities,probability.unsqueeze(0).detach().cpu().numpy())
+		return probabilities
 
 
 	def visualize_value_heatmaps_for_debug(self, goals_predicted_during_training):
@@ -513,10 +557,14 @@ class DTSampler:
 		achieved_values, exploration_values, q_values, _ = self.get_rescaled_rewards(combined_heatmap, None)
 		achieved_values = achieved_values.reshape(-1, 1)
 		exploration_values = exploration_values.reshape(-1, 1)
+		probability_preds = self.get_probabilities_over_trajectory(combined_heatmap)
+		probability_preds = probability_preds.reshape(-1, 1)
+
 		q_values = q_values.reshape(-1, 1)
 		q_pos_val = np.hstack((combined_heatmap, self.beta * q_values))
 		aim_pos_val = np.hstack((combined_heatmap, self.gamma * achieved_values))
 		expl_pos_val = np.hstack((combined_heatmap, self.sigma * exploration_values))
+		prob_pos_val = np.hstack((combined_heatmap, probability_preds))
 		combined_pos_val = np.hstack((combined_heatmap, (self.beta * q_values +  self.gamma * achieved_values + self.sigma * exploration_values)))
 		distance_matrix = np.hstack((combined_heatmap, self.distance_map.visitation_matrix.clone().detach().cpu().numpy().reshape(combined_heatmap.shape[0], 1)))
 		plot_dict = {}
@@ -524,7 +572,8 @@ class DTSampler:
 		plot_dict["Aim Heatmap"]  = aim_pos_val
 		plot_dict["Explore Heatmap"]  = expl_pos_val
 		plot_dict["Combined Heatmap"] = combined_pos_val
-		plot_dict["Timestep Distance Heatmap"] = distance_matrix
+		plot_dict["Probability Heatmap"] = prob_pos_val
+		# plot_dict["Timestep Distance Heatmap"] = distance_matrix
   		# for heatmap in plot_dict.values():
 		# 	combined_heatmap[:, 2] += heatmap[:, 2]
 
