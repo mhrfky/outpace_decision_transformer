@@ -47,7 +47,9 @@ class StatesBuffer:
 	def remove_states_near_the_trajectory(self, trajectory, threshold):
 		for state in trajectory:
 			self.remove_states_near_the_state(state, threshold)
-
+	def remove_states_near_other_sample(self, sample, threshold):
+		for state in sample:
+			self.remove_states_near_the_state(state, threshold)
 	def remove_states_near_the_state(self, state, threshold):
 		delete_indices = []
 		for i, s in enumerate(self.__list): #TODO rename
@@ -135,10 +137,12 @@ class DTSampler:
 
 		self.negatives_buffer = StatesBuffer()
 		self.bnn_model = BiggerNN(2,1).to(device)
-		self.optimizer = optim.Adam(self.bnn_model.parameters(), lr=0.001)
+		self.bnn_region_optimizer = optim.Adam(self.bnn_model.parameters(), lr=0.001)
+		self.bnn_trajectory_optimizer = optim.Adam(self.bnn_model.parameters(), lr=0.001)
 		self.negatives_buffer.fill_list_with_states_near_a_point(self.init_goal)
 		self.positives_buffer = StatesBuffer(200)
 		self.positives_buffer.fill_list_with_random_around_maze(self.limits, 100)
+		self.sampled_goals = np.array([[0,0]])
 		pass # debug
 	def reward_to_rtg(self,rewards):
 		return rewards - rewards[-1]
@@ -264,8 +268,9 @@ class DTSampler:
 		return positives
 	
 
-	def train_bnn(self):
-		negatives = self.negatives_buffer.sample(64)
+	def train_bnn(self, achieved_goals_negatives):
+		negatives = self.negatives_buffer.sample(32)
+		negatives = np.concatenate((negatives, achieved_goals_negatives[-32:]))
 		positives = self.positives_buffer.sample(64)
 
 		neg_labels = np.zeros(len(negatives))
@@ -273,18 +278,20 @@ class DTSampler:
 
 		x_train = np.concatenate((negatives, positives), axis=0)
 		y_train = np.concatenate((neg_labels, pos_labels), axis=0)
-
+		
 		x_train = torch.tensor(x_train, dtype=torch.float32).to(self.device)
 		y_train = torch.tensor(y_train, dtype=torch.float32).to(self.device)
-
+		
+		
 		self.bnn_model.train()
-		self.optimizer.zero_grad()
+		self.bnn_region_optimizer.zero_grad()
 		outputs = self.bnn_model(x_train).squeeze()
 		outputs = torch.sigmoid(outputs)
 
 		loss = torch.nn.BCEWithLogitsLoss()(outputs, y_train)
 		loss.backward()
-		self.optimizer.step()
+		self.bnn_region_optimizer.step()
+
 
 	def update(self, step, episode, achieved_goals, qs):
 		
@@ -305,19 +312,19 @@ class DTSampler:
 
 
 		self.latest_achieved 	= np.array([achieved_goals])
-		self.latest_rtgs 		= np.array([rtgs])
+		self.latest_rtgs 		= np.array([rtgs ])
 
 		self.negatives_buffer.insert_trajectory(achieved_goals)
 
 		self.max_achieved_reward = max(max(rewards),self.max_achieved_reward)
 		self.latest_qs = q_values
 		
-		self.positives_buffer.remove_states_near_the_trajectory(achieved_goals, 0.5)
+		self.positives_buffer.remove_states_near_other_sample(self.negatives_buffer.sample(len(self.negatives_buffer)//2), 0.5)
 		if len(self.positives_buffer) < 64 : #TODO make it class variable
 			self.positives_buffer.fill_list_with_random_around_maze(self.limits, 64 - len(self.positives_buffer)) # sample the same thing
 		
-		self.train_bnn()
-		self.train_single_trajectory(achieved_goals, rtgs, min_max_val_dict)
+		self.train_bnn(achieved_goals[-64:])
+		self.train_single_trajectory(achieved_goals, rtgs, achieved_values, min_max_val_dict)
    		
 		self.max_rewards_so_far.append(max(rewards))
 		self.residual_goals_debug = []
@@ -341,7 +348,7 @@ class DTSampler:
 				uncertainty_t = torch.stack(outputs).std(0).mean().item()
 			return uncertainty_t
 
-	def train_single_trajectory(self, achieved_goals_t, rtgs, min_max_val_dict):
+	def train_single_trajectory(self, achieved_goals_t, rtgs, achieved_values, min_max_val_dict):
 		goals_predicted_debug = []
 
 		achieved_goals_t = torch.tensor([achieved_goals_t], device="cuda", dtype=torch.float32)
@@ -360,12 +367,12 @@ class DTSampler:
 			temp_rtg -= rtgs[0, i + 1]
 			temp_rtg = temp_rtg.unsqueeze(-1)
 
-			predicted_goal_mean, predicted_goal_logvar, predicted_return, _ = self.dt.forward(temp_achieved, temp_actions, None, temp_rtg, temp_timesteps)
-			predicted_goal_mean = predicted_goal_mean[0, -1]
-			predicted_goal_logvar = predicted_goal_logvar[0, -1]
-			predicted_goal_std = torch.exp(0.5 * predicted_goal_logvar)
-			predicted_goal_distribution = torch.distributions.Normal(predicted_goal_mean, predicted_goal_std)
-
+			predicted_goal_mean_t, predicted_goal_logvar_t,_ ,predicted_return_t = self.dt.forward(temp_achieved, temp_actions, None, temp_rtg, temp_timesteps)
+			predicted_goal_mean_t = predicted_goal_mean_t[0, -1]
+			predicted_goal_logvar_t = predicted_goal_logvar_t[0, -1]
+			predicted_goal_std = torch.exp(0.5 * predicted_goal_logvar_t)
+			predicted_goal_distribution = torch.distributions.Normal(predicted_goal_mean_t, predicted_goal_std)
+			predicted_return_t = predicted_return_t[0,-1]
 			predicted_goal_t = predicted_goal_distribution.rsample()
 			goals_predicted_debug.append(predicted_goal_t.detach().cpu().numpy())
 
@@ -379,26 +386,24 @@ class DTSampler:
 				q_val_t = torch.min(q1_t, q2_t)
 				exploration_val = self.calculate_exploration_value(achieved_goals_t[0], predicted_goal_t)
 
-				aim_val_t = rescale_array(aim_val_t, min_max_val_dict["min_aim"], min_max_val_dict["max_aim"])
-				exploration_val = rescale_array(exploration_val, min_max_val_dict["min_expl"], min_max_val_dict["max_expl"])
-				q_val_t = rescale_array(q_val_t, min_max_val_dict["min_q"], min_max_val_dict["max_q"])
+
 
 				goal_val_t = self.gamma * aim_val_t + q_val_t * self.beta + self.sigma * exploration_val
 				best_state_index = torch.argmin(temp_rtg[0])
 
 				current_state = achieved_goals_t[0, best_state_index]
 
-				rtg_pred_loss = torch.nn.L1Loss()(goal_val_t + predicted_return, expected_val.unsqueeze(0))
-
+				goal_val_loss = torch.nn.L1Loss()(goal_val_t, expected_val.unsqueeze(0))
+				rtg_pred_loss = torch.nn.L1Loss()(predicted_return_t, goal_val_t)
 				# Calculate Information Gain Reward
 				outputs = self.bnn_model(predicted_goal_t.unsqueeze(0))  # Get probability prediction
 				probability_pred = torch.sigmoid(outputs)
 				uncertainty_loss = torch.abs(probability_pred - 0.5).mean()  # Treat uncertainty as the difference from 0.5
-
+				euclid_distance_loss = torch.sqrt((predicted_goal_t - achieved_goals_t[0,i])**2).sum()
 				# info_gain_loss = torch.tensor(info_gain_rewards.mean(), dtype=torch.float32, device=self.device)
 
 				# Combine losses
-				total_loss =  rtg_pred_loss- uncertainty_loss
+				total_loss =  goal_val_loss + rtg_pred_loss - uncertainty_loss #+ predicted_return_t#- q_val_t
 
 				self.state_optimizer.zero_grad()
 				total_loss.backward(retain_graph=True)
@@ -424,6 +429,7 @@ class DTSampler:
 			# goal_t = self.generate_goal(episode_observes, rtgs[0] + self.return_to_add )
 			goal =  goal_t.detach().cpu().numpy()
 			self.latest_desired_goal = goal
+			self.sampled_goals = np.concatenate((self.sampled_goals, [goal]))
 			return goal
 		else:
 			episode_observes = np.array([self.eval_env.convert_obs_to_dict(episode_observes[i])["achieved_goal"] for i in range(len(episode_observes))])
@@ -546,6 +552,9 @@ class DTSampler:
 		pos = (i // fig_shape[1], i % fig_shape[1])
 		self.visualize_sampling_points(axs[pos[0]][pos[1]])
 
+		i += 1
+		pos = (i // fig_shape[1], i % fig_shape[1])
+		self.visualize_sampled_goals(axs[pos[0]][pos[1]])
 		# i += 1
 		# pos = (i // fig_shape[1], i % fig_shape[1])
 		# self.visualize_best_trajectories(axs[pos[0]][pos[1]], "Trajectories 1")
@@ -558,7 +567,14 @@ class DTSampler:
 			f'{self.video_recorder.debug_dir}/combined_heatmaps_episode_{str(self.episode)}.jpg'
 		)
 		plt.close(fig)
-
+	def visualize_sampled_goals(self,ax):
+		t = np.arange(0, len(self.sampled_goals))
+		scatter = ax.scatter( self.sampled_goals[:,0],self.sampled_goals[:,1],c = t, cmap='viridis', edgecolor='k')
+		ax.set_xlim(-2, 10)
+		ax.set_ylim(-2, 10)
+		cbar = ax.figure.colorbar(scatter, ax=ax, label='Time step')
+		ax.set_aspect('equal')  # Ensuring equal aspect ratio
+		ax.grid(True)
 	def visualize_sampling_points(self, ax):
 		negs = self.negatives_buffer.sample(512)
 		poss = self.positives_buffer.sample(len(self.positives_buffer))
@@ -650,16 +666,11 @@ class DTSampler:
 		x = self.latest_achieved[0,:, 0]
 		y = self.latest_achieved[0,:, 1]
 		rtgs = self.latest_rtgs[0]
-		if self.residual_goals_debug:
-			residual_goals_np = np.array(self.residual_goals_debug)
-			res_x = residual_goals_np[:,0]
-			res_y = residual_goals_np[:,1]
-			ax.scatter(res_x, res_y, color='blue', marker='x', s=100, label='Latest Desired Goal')
+
   
 		# Normalize time values to [0, 1] for color mapping
 		# t_normalized = (t - t.min()) / (t.max() - t.min())
 		scatter = ax.scatter(x, y, c=rtgs, cmap='viridis', edgecolor='k')
-		ax.scatter(self.latest_desired_goal[0], self.latest_desired_goal[1], color='red', marker='x', s=100, label='Latest Desired Goal')
 		ax.scatter(self.latest_desired_goal[0], self.latest_desired_goal[1], color='red', marker='x', s=100, label='Latest Desired Goal')
   
 		if len(self.residual_goals_debug):
