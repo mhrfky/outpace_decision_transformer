@@ -19,6 +19,7 @@ from hgg.utils import BiggerNN
 import torch.optim as optim
 from hgg.utils import generate_random_samples
 from hgg.utils import euclid_distance
+from hgg.dt_hgg_visualizer import Visualizer
 class StatesBuffer:
 	def __init__(self, max_size=5000):
 		self.__list = np.array([[0, 0]])
@@ -117,7 +118,7 @@ class DTSampler:
 		self.dim = np.prod(self.env.convert_obs_to_dict(self.env.reset())['achieved_goal'].shape)
 		self.goal_distance = goal_distance
 		self.video_recorder = video_recorder
-		
+		self.visualizer = Visualizer(self)	
 		self.init_goal = self.eval_env.convert_obs_to_dict(self.eval_env.reset())['achieved_goal'].copy()
 		
 				
@@ -502,112 +503,6 @@ class DTSampler:
 			probability = torch.sigmoid(output)
 			probabilities = np.append(probabilities,probability.unsqueeze(0).detach().cpu().numpy())
 		return probabilities
-
-
-
-	def visualize_value_heatmaps_for_debug(self, goals_predicted_during_training):
-		assert self.video_recorder is not None
-		fig_shape = (4,3)
-		fig, axs = plt.subplots(fig_shape[0], fig_shape[1], figsize=(16, 12), constrained_layout=True)  # 3 rows, 3 columns of subplots
-		combined_heatmap = self.create_combined_np()  # type: ignore
-		achieved_values, exploration_values, q_values, _ = self.get_rescaled_rewards(combined_heatmap, None)
-		achieved_values = achieved_values.reshape(-1, 1)
-		exploration_values = exploration_values.reshape(-1, 1)
-		probability_loss_preds = self.get_probability_loss_over_trajectory(combined_heatmap)
-		probability_loss_preds = probability_loss_preds.reshape(-1, 1)
-
-		probability_preds = self.get_probabilities_over_trajectory(combined_heatmap)
-		probability_preds = probability_preds.reshape(-1, 1)
-
-		q_values = q_values.reshape(-1, 1)
-		q_pos_val = np.hstack((combined_heatmap, self.beta * q_values))
-		aim_pos_val = np.hstack((combined_heatmap, self.gamma * achieved_values))
-		expl_pos_val = np.hstack((combined_heatmap, self.sigma * exploration_values))
-		prob_loss_pos_val = np.hstack((combined_heatmap, probability_loss_preds))
-		prob_pos_val = np.hstack((combined_heatmap, probability_preds))
-
-		combined_pos_val = np.hstack((combined_heatmap, (self.beta * q_values +  self.gamma * achieved_values + self.sigma * exploration_values)))
-		plot_dict = {}
-		plot_dict["Q Heatmap"] = q_pos_val
-		plot_dict["Aim Heatmap"]  = aim_pos_val
-		plot_dict["Explore Heatmap"]  = expl_pos_val
-		plot_dict["Combined Heatmap"] = combined_pos_val
-		plot_dict["Probability Loss Heatmap"] = prob_loss_pos_val
-		plot_dict["Probability Heatmap"] = prob_pos_val
-
-		# plot_dict["Timestep Distance Heatmap"] = distance_matrix
-  		# for heatmap in plot_dict.values():
-		# 	combined_heatmap[:, 2] += heatmap[:, 2]
-
-		# plot_dict["Combined Heatmap"] = combined_heatmap
-
-		for i, key in enumerate(plot_dict.keys()):
-			pos = (i // fig_shape[1], i % fig_shape[1])
-			self.plot_heatmap(plot_dict[key], axs[pos[0]][pos[1]], key)
-			axs[pos[0]][pos[1]].scatter(goals_predicted_during_training[:,0],goals_predicted_during_training[:,1], c = np.arange(len(goals_predicted_during_training)), cmap = "gist_heat", s=10)
-
-		i += 1
-		pos = (i // fig_shape[1], i % fig_shape[1])
-		self.visualize_trajectories_on_time(axs[pos[0]][pos[1]])
-
-		i += 1
-		pos = (i // fig_shape[1], i % fig_shape[1])
-		self.visualize_trajectories_on_rtgs(axs[pos[0]][pos[1]])
-
-		i += 1
-		pos = (i // fig_shape[1], i % fig_shape[1])
-		self.visualize_max_rewards(axs[pos[0]][pos[1]])
-
-		i += 1
-		pos = (i // fig_shape[1], i % fig_shape[1])
-		self.visualize_sampling_points(axs[pos[0]][pos[1]])
-
-		i += 1
-		pos = (i // fig_shape[1], i % fig_shape[1])
-		self.visualize_sampled_goals(axs[pos[0]][pos[1]])
-		# i += 1
-		# pos = (i // fig_shape[1], i % fig_shape[1])
-		# self.visualize_best_trajectories(axs[pos[0]][pos[1]], "Trajectories 1")
-
-		# i += 1
-		# pos = (i // fig_shape[1], i % fig_shape[1])
-		# self.visualize_trajectories_on_qs(axs[pos[0]][pos[1]])
-
-		plt.savefig(
-			f'{self.video_recorder.debug_dir}/combined_heatmaps_episode_{str(self.episode)}.jpg'
-		)
-		plt.close(fig)
-	def visualize_sampled_goals(self,ax):
-		t = np.arange(0, len(self.sampled_goals))
-		scatter = ax.scatter( self.sampled_goals[:,0],self.sampled_goals[:,1],c = t, cmap='viridis', edgecolor='k')
-		ax.set_xlim(-2, 10)
-		ax.set_ylim(-2, 10)
-		cbar = ax.figure.colorbar(scatter, ax=ax, label='Time step')
-		ax.set_aspect('equal')  # Ensuring equal aspect ratio
-		ax.grid(True)
-	def visualize_sampling_points(self, ax):
-		negs = self.negatives_buffer.sample(512)
-		poss = self.positives_buffer.sample(len(self.positives_buffer))
-
-		ax.scatter(negs[:,0], negs[:,1], c="red")
-		ax.scatter(poss[:,0], poss[:,1], c="green")
-
-		ax.set_title("sampling points")
-		ax.set_xlabel('X coordinate')
-		ax.set_ylabel('Y coordinate')
-		ax.set_xlim(-2, 10)
-		ax.set_ylim(-2, 10)
-		ax.set_aspect('equal')  # Ensuring equal aspect ratio
-		ax.grid(True)
-	def visualize_max_rewards(self, ax):
-		max_rewards_np = np.array(self.max_rewards_so_far)
-		x = np.arange(0, len(max_rewards_np))
-		ax.plot(x, max_rewards_np, label='Trend', marker='.', markersize=5, linestyle='-', linewidth=2)
-		ax.set_xlabel('x')
-		ax.set_ylabel('reward')
-		ax.set_title('Max Rewards')
-		ax.grid(True)  # Enable grid for better readability
-
 	def create_combined_np(self):
 		data_points = [
 			[x, y]
@@ -617,113 +512,6 @@ class DTSampler:
 			)
 		]
 		return np.array(data_points, dtype=np.float32)
+	def visualize_value_heatmaps_for_debug(self, goals_predicted_during_training):
+		self.visualizer.visualize_value_heatmaps_for_debug(goals_predicted_during_training)
 
-	def plot_heatmap(self, data_points, ax, title):
-		x = data_points[:, 0]
-		y = data_points[:, 1]
-		values = data_points[:, 2]
-		grid_x, grid_y = np.mgrid[min(x):max(x):100j, min(y):max(y):100j]
-		grid_values = griddata((x, y), values, (grid_x, grid_y), method='cubic')
-		im = ax.imshow(grid_values.T, extent=(min(x), max(x), min(y), max(y)), origin='lower', cmap='viridis')
-		ax.figure.colorbar(im, ax=ax, label='Value')
-		ax.set_title(title)
-		ax.set_xlabel('X coordinate')
-		ax.set_ylabel('Y coordinate')
-		ax.set_xlim(-2, 10)
-		ax.set_ylim(-2, 10)
-		ax.set_aspect('equal')  # Ensuring equal aspect ratio
-		ax.grid(True)
-		x = data_points[:, 0]
-		y = data_points[:, 1]
-		values = data_points[:, 2]
-		grid_x, grid_y = np.mgrid[min(x):max(x):100j, min(y):max(y):100j]
-		grid_values = griddata((x, y), values, (grid_x, grid_y), method='cubic')
-		im = ax.imshow(grid_values.T, extent=(min(x), max(x), min(y), max(y)), origin='lower', cmap='viridis')
-		ax.figure.colorbar(im, ax=ax, label='Value')
-		ax.set_title(title)
-		ax.set_xlabel('X coordinate')
-		ax.set_ylabel('Y coordinate')
-		ax.set_xlim(-2, 10)
-		ax.set_ylim(-2, 10)
-		ax.set_aspect('equal')  # Ensuring equal aspect ratio
-		ax.grid(True)
-
-	def visualize_trajectories_on_time(self, ax, title='Position Over Time'):
-		x = self.latest_achieved[0,:, 0]
-		y = self.latest_achieved[0,:, 1]
-		t = np.arange(0, len(x))
-
-
-		t_normalized = (t - t.min()) / (t.max() - t.min())
-		scatter = ax.scatter(x, y, c=t_normalized, cmap='viridis', edgecolor='k')
-		if len(self.residual_goals_debug):
-			residual_goals_np = np.array(self.residual_goals_debug)
-			res_x = residual_goals_np[:,0]
-			res_y = residual_goals_np[:,1]
-			ax.scatter(res_x, res_y, color='blue', marker='x', s=100, label='Latest Desired Goal')
-		ax.scatter(self.latest_desired_goal[0], self.latest_desired_goal[1], color='red', marker='x', s=100, label='Latest Desired Goal')
-
-		cbar = ax.figure.colorbar(scatter, ax=ax, label='Time step')
-
-		ax.set_xlabel('X Position')
-		ax.set_ylabel('Y Position')
-		ax.set_title(title)
-		ax.set_xlim(-2, 10)
-		ax.set_ylim(-2, 10)
-		ax.set_aspect('equal')  # Ensuring equal aspect ratio
-		ax.grid(True)
-	def visualize_trajectories_on_rtgs(self, ax, title='Position Over RTGs'):
-		x = self.latest_achieved[0,:, 0]
-		y = self.latest_achieved[0,:, 1]
-		rtgs = self.latest_rtgs[0]
-
-  
-		# Normalize time values to [0, 1] for color mapping
-		# t_normalized = (t - t.min()) / (t.max() - t.min())
-		scatter = ax.scatter(x, y, c=rtgs, cmap='viridis', edgecolor='k')
-		ax.scatter(self.latest_desired_goal[0], self.latest_desired_goal[1], color='red', marker='x', s=100, label='Latest Desired Goal')
-  
-		if len(self.residual_goals_debug):
-			residual_goals_np = np.array(self.residual_goals_debug)
-			res_x = residual_goals_np[:,0]
-			res_y = residual_goals_np[:,1]
-			ax.scatter(res_x, res_y, color='blue', marker='x', s=100, label='Latest Desired Goal')
-		cbar = ax.figure.colorbar(scatter, ax=ax, label='Time step')
-
-		ax.set_xlabel('X Position')
-		ax.set_ylabel('Y Position')
-		ax.set_title(title)
-		ax.set_xlim(-2, 10)
-		ax.set_ylim(-2, 10)
-		ax.set_aspect('equal')  # Ensuring equal aspect ratio
-		ax.grid(True)
-
-	def visualize_trajectories_on_qs(self, ax, title='Position Over Qs'):
-		x = self.latest_achieved[0,:, 0]
-		y = self.latest_achieved[0,:, 1]
-		rtgs = self.latest_qs
-		if self.residual_goals_debug:
-			residual_goals_np = np.array(self.residual_goals_debug)
-			res_x = residual_goals_np[:,0]
-			res_y = residual_goals_np[:,1]
-			ax.scatter(res_x, res_y, color='blue', marker='x', s=100, label='Latest Desired Goal')
-  
-		# Normalize time values to [0, 1] for color mapping
-		# t_normalized = (t - t.min()) / (t.max() - t.min())
-		scatter = ax.scatter(x, y, c=rtgs, cmap='viridis', edgecolor='k')
-		ax.scatter(self.latest_desired_goal[0], self.latest_desired_goal[1], color='red', marker='x', s=100, label='Latest Desired Goal')
-  
-		if len(self.residual_goals_debug):
-			residual_goals_np = np.array(self.residual_goals_debug)
-			res_x = residual_goals_np[:,0]
-			res_y = residual_goals_np[:,1]
-			ax.scatter(res_x, res_y, color='blue', marker='x', s=100, label='Latest Desired Goal')
-		cbar = ax.figure.colorbar(scatter, ax=ax, label='Time step')
-
-		ax.set_xlabel('X Position')
-		ax.set_ylabel('Y Position')
-		ax.set_title(title)
-		ax.set_xlim(-2, 10)
-		ax.set_ylim(-2, 10)
-		ax.set_aspect('equal')  # Ensuring equal aspect ratio
-		ax.grid(True)
