@@ -607,14 +607,13 @@ class Workspace(object):
         hgg_start_time = time.time()
         hgg_sampler.update(initial_goals, desired_goals, replay_buffer = self.expl_buffer, meta_nml_epoch=episode) # dont think about initial_goals, they are not used
         # print('hgg sampler update step : {} time : {}'.format(self.step, time.time() - hgg_start_time))
-    def dt_sampler_update(self,step, episode, episode_observes, qs):
-        self.dt_sampler.update(step, episode, episode_observes, qs)
+    def dt_sampler_update(self,step, episode, episode_observes, episode_acts, qs):
+        self.dt_sampler.update(step, episode, episode_observes, episode_acts, qs)
 
     def _run(self):        
         episode, episode_reward, episode_step, start_time, recent_sampled_goals, done, info, current_pocket_success, current_pocket_trial = self.run_init()
         agent = self.get_agent()
         first_iteration = True
-        qs = [[0,0]]
         
         while self.step <= self.cfg.num_train_steps:
             
@@ -662,7 +661,10 @@ class Workspace(object):
                 episode_reward = 0
                 episode_step = 0
                 episode += 1
-                episode_observes = [obs]
+                episode_observes = []
+                episode_acts     = []
+                qs = []
+
                 self.logger.log('train/episode', episode, self.step)
 
             replay_buffer = self.get_buffer()
@@ -695,7 +697,8 @@ class Workspace(object):
             next_obs, reward, done, info = self.env.step(action)
             # self.env.render()
             episode_reward += reward
-            episode_observes.append(next_obs)
+            episode_observes.append(obs)
+            episode_acts.append(action)
 
             last_timestep = True if (episode_step+1) % self.max_episode_timesteps == 0 or done else False
 
@@ -711,8 +714,7 @@ class Workspace(object):
             if last_timestep:
                 self.last_timestep_save(episode_observes, replay_buffer)
                 qs = np.array(qs)
-                self.dt_sampler_update(self.step, episode, episode_observes, qs)
-                qs = [[0,0]]
+                self.dt_sampler_update(self.step, episode, episode_observes, episode_acts, qs)
 
                 
                     

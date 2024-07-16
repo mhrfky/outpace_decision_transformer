@@ -293,28 +293,36 @@ class DTSampler:
 		self.bnn_region_optimizer.step()
 
 
-	def update(self, step, episode, achieved_goals, qs):
+	def update(self, step, episode, achieved_goals, actions, qs):
 		
 		
 		#achieved pool has the whole trajectory throughtout the episode, while achieved_pool_init_state has the initial state where it started the episode
 		# achieved_pool, achieved_pool_init_state = self.achieved_trajectory_pool.pad() # dont care about pad, it receives the stored achieved trajectories
 		if not len(qs):
-			qs = np.zeros((101,2))
+			qs = np.zeros((100,2))
 		self.step = step
 		self.episode = episode
-		achieved_goals = np.array([self.eval_env.convert_obs_to_dict(achieved_goals[i])["achieved_goal"] for i in range(len(achieved_goals))])
+		# achieved_goals_states = []
+		# # achieved_goals_velocity = []
+		# for state in achieved_goals:
+		# 	obs_dict = self.eval_env.convert_obs_to_dict(state)
+		# 	achieved_goals_states.append(obs_dict["achieved_goal"])
+		# 	# achieved_goals_velocity.append(obs_dict["observation"][-3:-1])
+		# achieved_goals_states = np.array(achieved_goals_states)
+		# # achieved_goals_velocity = np.array(achieved_goals_velocity)
+		achieved_goals_states = np.array([self.eval_env.convert_obs_to_dict(achieved_goals[i])["achieved_goal"] for i in range(len(achieved_goals))])
+		actions = np.array(actions)
 
-
-		achieved_values, exploration_values, q_values, min_max_val_dict = self.get_rescaled_rewards(achieved_goals, qs)
+		achieved_values, exploration_values, q_values, min_max_val_dict = self.get_rescaled_rewards(achieved_goals_states, qs)
 		rewards = self.gamma * achieved_values + self.beta * q_values + self.sigma * exploration_values# either get the qs earlier than 2000 steps or remove gamma limitation before then
 
 		rtgs = self.reward_to_rtg(rewards)
 
 
-		self.latest_achieved 	= np.array([achieved_goals])
+		self.latest_achieved 	= np.array([achieved_goals_states])
 		self.latest_rtgs 		= np.array([rtgs ])
 
-		self.negatives_buffer.insert_trajectory(achieved_goals)
+		self.negatives_buffer.insert_trajectory(achieved_goals_states)
 
 		self.max_achieved_reward = max(max(rewards),self.max_achieved_reward)
 		self.latest_qs = q_values
@@ -323,8 +331,8 @@ class DTSampler:
 		if len(self.positives_buffer) < 64 : #TODO make it class variable
 			self.positives_buffer.fill_list_with_random_around_maze(self.limits, 64 - len(self.positives_buffer)) # sample the same thing
 		
-		self.train_bnn(achieved_goals[-64:])
-		self.train_single_trajectory(achieved_goals, rtgs, achieved_values, min_max_val_dict)
+		self.train_bnn(achieved_goals_states[-64:])
+		self.train_single_trajectory(achieved_goals_states, actions, rtgs, achieved_values, min_max_val_dict)
    		
 		self.max_rewards_so_far.append(max(rewards))
 		self.residual_goals_debug = []
@@ -348,26 +356,27 @@ class DTSampler:
 				uncertainty_t = torch.stack(outputs).std(0).mean().item()
 			return uncertainty_t
 
-	def train_single_trajectory(self, achieved_goals_t, rtgs, achieved_values, min_max_val_dict):
+	def train_single_trajectory(self, achieved_goals, actions, rtgs, achieved_values, min_max_val_dict):
 		goals_predicted_debug = []
+		
+		achieved_goals_t = torch.tensor([achieved_goals], device="cuda", dtype=torch.float32)
+		actions_t = torch.tensor([actions], device = "cuda", dtype = torch.float32)
+		rtgs_t = torch.tensor([rtgs], device="cuda", dtype=torch.float32)
 
-		achieved_goals_t = torch.tensor([achieved_goals_t], device="cuda", dtype=torch.float32)
-		rtgs = torch.tensor([rtgs], device="cuda", dtype=torch.float32)
-
-		actions = torch.zeros((1, achieved_goals_t.size(1), 2), device="cuda", dtype=torch.float32)
+		# actions = torch.zeros((1, achieved_goals_t.size(1), 2), device="cuda", dtype=torch.float32)
 		timesteps = torch.arange(achieved_goals_t.size(1), device="cuda").unsqueeze(0)
 
 
 		for i in range(1, achieved_goals_t.shape[1] - 1):
 			temp_achieved = achieved_goals_t[:, :i]
-			temp_actions = actions[:, :i]
+			temp_actions = actions_t[:, :i]
 			temp_timesteps = timesteps[:, :i]
 
-			temp_rtg = rtgs[:, :i].clone()
-			temp_rtg -= rtgs[0, i + 1]
+			temp_rtg = rtgs_t[:, :i].clone()
+			temp_rtg -= rtgs_t[0, i + 1]
 			temp_rtg = temp_rtg.unsqueeze(-1)
 
-			predicted_goal_mean_t, predicted_goal_logvar_t,_ ,predicted_return_t = self.dt.forward(temp_achieved, temp_actions, None, temp_rtg, temp_timesteps)
+			predicted_goal_mean_t, predicted_goal_logvar_t, predicted_action_t ,predicted_return_t = self.dt.forward(temp_achieved, temp_actions, None, temp_rtg, temp_timesteps)
 			predicted_goal_mean_t = predicted_goal_mean_t[0, -1]
 			predicted_goal_logvar_t = predicted_goal_logvar_t[0, -1]
 			predicted_goal_std = torch.exp(0.5 * predicted_goal_logvar_t)
@@ -400,10 +409,11 @@ class DTSampler:
 				probability_pred = torch.sigmoid(outputs)
 				uncertainty_loss = torch.abs(probability_pred - 0.5).mean()  # Treat uncertainty as the difference from 0.5
 				euclid_distance_loss = torch.sqrt((predicted_goal_t - achieved_goals_t[0,i])**2).sum()
+				action_loss = torch.sqrt((predicted_action_t - actions_t[0,i])**2).sum()
 				# info_gain_loss = torch.tensor(info_gain_rewards.mean(), dtype=torch.float32, device=self.device)
 
 				# Combine losses
-				total_loss =  goal_val_loss + rtg_pred_loss - uncertainty_loss #+ predicted_return_t#- q_val_t
+				total_loss =  goal_val_loss + rtg_pred_loss - uncertainty_loss  #+ action_loss#+ predicted_return_t#- q_val_t
 
 				self.state_optimizer.zero_grad()
 				total_loss.backward(retain_graph=True)

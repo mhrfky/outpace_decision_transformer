@@ -14,3 +14,7 @@ figures/
 *.pt
 *.pkl
 /target/
+outpace_decision_transformer.code-workspace
+a.png
+playground.py
+.vscode/launch.json
