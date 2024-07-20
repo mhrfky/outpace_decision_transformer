@@ -1,12 +1,8 @@
-import numpy as np
 import torch
 import torch.nn as nn
-
 import transformers
-
 from dt.models.model import TrajectoryModel
 from dt.models.trajectory_gpt2 import GPT2Model
-
 
 class DecisionTransformer(TrajectoryModel):
 

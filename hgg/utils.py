@@ -4,6 +4,8 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.distributions.normal import Normal
 import numpy as np
+from tslearn.metrics import SoftDTWLossPyTorch
+
 class MoveOntheLastPartLoss(nn.Module):
     def __init__(self, threshold):
         super(MoveOntheLastPartLoss, self).__init__()
@@ -92,3 +94,73 @@ def generate_random_samples(lower_limit, upper_limit, sample_shape, num_samples)
     return samples_list
 def euclid_distance(p1,p2):
         return np.linalg.norm(p1 - p2)
+
+import torch
+
+def dtw_loss(predicted_trajectory, actual_trajectory):
+    """
+    Compute the Dynamic Time Warping (DTW) distance between two trajectories using PyTorch.
+    """
+    n, m = predicted_trajectory.size(0), actual_trajectory.size(0)
+    dtw_matrix = torch.full((n + 1, m + 1), float('inf'), device=predicted_trajectory.device)
+    dtw_matrix[0, 0] = 0
+
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            cost = torch.norm(predicted_trajectory[i - 1] - actual_trajectory[j - 1])
+            min_val = torch.min(
+                torch.min(dtw_matrix[i - 1, j], dtw_matrix[i, j - 1]), 
+                dtw_matrix[i - 1, j - 1]
+            )
+            dtw_matrix[i, j] = cost + min_val
+
+    return dtw_matrix[n, m]
+soft_dtw_loss = SoftDTWLossPyTorch(gamma=0.1)
+
+def trajectory_similarity_loss(predicted_trajectory, actual_trajectory, alpha=0.5, beta=0.3, gamma=0.2):
+    """
+    Custom loss function for trajectory similarity.
+    """
+    # Compute the Soft-DTW loss
+    dtw_distance = soft_dtw_loss(predicted_trajectory, actual_trajectory.unsqueeze(0)).mean()
+
+    # Euclidean distance loss
+    euclidean_distance = torch.mean(torch.norm(predicted_trajectory - actual_trajectory, dim=1))
+
+    # Smoothness regularization (L2 norm of differences between consecutive points)
+    smoothness_reg = torch.sum(torch.norm(torch.diff(predicted_trajectory, dim=0), dim=1)**2)
+
+    # Combine losses
+    total_loss = alpha * dtw_distance + beta * euclidean_distance + gamma * smoothness_reg
+
+    return total_loss, dtw_distance, euclidean_distance, smoothness_reg
+
+def find_diminishing_trajectories(rtgs, length=10, threshold=0.01):
+    """
+    Find the starting indices of diminishing trajectories in a sequence of RTGs.
+    
+    Parameters:
+        rtgs (np.array or list): The sequence of return-to-go values.
+        length (int): The length of the diminishing trajectory to find.
+        threshold (float): The maximum allowed increase in RTG that does not break the streak.
+        
+    Returns:
+        List of starting indices of diminishing trajectories.
+    """
+    if isinstance(rtgs, list):
+        rtgs = np.array(rtgs)
+        
+    diminishing_streaks = []
+    n = len(rtgs)
+    counter = 0
+    
+    for i in range(1, n):
+        if rtgs[i] <= rtgs[i-1] + threshold:
+            counter += 1
+        else:
+            counter = 0
+
+        if counter >= length - 1:
+            diminishing_streaks.append(i - length + 1)
+            
+    return diminishing_streaks
