@@ -578,35 +578,7 @@ class Workspace(object):
 
     def run(self):        
         self._run()
-    def hgg_update(self,episode):
-        initial_goals = []
-        desired_goals = []
-        hgg_sampler = self.hgg_sampler
 
-        # collect s_0, g from T*                            
-        for i in range(self.cfg.hgg_kwargs.match_sampler_kwargs.num_episodes):                                
-            temp_obs = self.eval_env.convert_obs_to_dict(self.eval_env.reset())
-            goal_a = temp_obs['achieved_goal'].copy()                                
-            if 'meta_nml' in hgg_sampler.cost_type or 'aim_f' in hgg_sampler.cost_type: 
-                # In this case, desired_goal is not used inside
-                # for preventing initial sampled hgg goals to be final goal
-                if self.cfg.env in ['AntMazeSmall-v0', 'PointUMaze-v0', 'PointNMaze-v0', 'PointSpiralMaze-v0']:
-                    noise_scale = 0.5                    
-                    noise = np.random.normal(loc=np.zeros_like(goal_a), scale=noise_scale*np.ones_like(goal_a))
-                elif self.cfg.env in ['sawyer_peg_push','sawyer_peg_pick_and_place']:
-                    noise_scale = 0.05
-                    noise = np.random.normal(loc=np.zeros_like(goal_a), scale=noise_scale*np.ones_like(goal_a))
-                    noise[2] = 0 # zero out z element to prevent sampling through the table
-                else:
-                    raise NotImplementedError
-                goal_d = goal_a + noise # These will be meaningless after achieved_goals are accumulated in hgg_achieved_trajectory_pool
-            else:
-                raise NotImplementedError
-            initial_goals.append(goal_a.copy())
-            desired_goals.append(goal_d.copy()) 
-        hgg_start_time = time.time()
-        hgg_sampler.update(initial_goals, desired_goals, replay_buffer = self.expl_buffer, meta_nml_epoch=episode) # dont think about initial_goals, they are not used
-        # print('hgg sampler update step : {} time : {}'.format(self.step, time.time() - hgg_start_time))
     def dt_sampler_update(self,step, episode, episode_observes, episode_acts, qs):
         self.dt_sampler.update(step, episode, episode_observes, episode_acts, qs)
 
@@ -730,11 +702,11 @@ class Workspace(object):
                     if info.get('is_current_goal_success'):
                         if (self.cfg.use_uncertainty_for_randomwalk not in [None, 'none', 'None']) and self.step > self.get_agent().meta_test_sample_size:
                             # residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
-                            residual_goal = self.get_residual_goal_with_dt(episode,episode_observes,qs)
+                            residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
 
                         else:
                             residual_goal = self.get_residual_goal_with_NML(obs)
-                            residual_goal = self.get_residual_goal_with_dt(episode,episode_observes,qs)
+                            residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
                         
                         self.env.reset_goal(residual_goal)
                         obs[-self.env.goal_dim:] = residual_goal.copy()
@@ -781,8 +753,8 @@ class Workspace(object):
                                 episode = episode, env=self.env, replay_buffer = self.get_inv_weight_curriculum_buffer(), \
                                 num_candidate = self.cfg.randomwalk_num_candidate, random_noise = self.cfg.randomwalk_random_noise, \
                                 uncertainty_mode = self.cfg.use_uncertainty_for_randomwalk)
-    def get_residual_goal_with_dt(self, episode, episode_observes,qs):
-        return self.dt_sampler.sample(episode_observes, qs)
+    def get_residual_goal_with_dt(self, episode, episode_observes,episode_acts, qs):
+        return self.dt_sampler.sample(episode_observes, episode_acts, qs)
 
     def last_timestep_save(self, episode_observes, replay_buffer):
         replay_buffer.add_trajectory(episode_observes)
