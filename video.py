@@ -12,8 +12,8 @@ class VideoRecorder(object):
         if not os.path.exists(root_dir):
             os.makedirs(root_dir)
         self.save_dir = utils.make_dir(root_dir, 'video') if root_dir else None
+        self.visualization_dir = utils.make_dir(root_dir, 'visualization') if root_dir else None
         self.debug_dir = utils.make_dir(root_dir, 'debug') if root_dir else None
-
         self.height = height
         self.width = width
         self.fps = fps

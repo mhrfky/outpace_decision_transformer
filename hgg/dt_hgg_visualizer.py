@@ -3,39 +3,40 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.interpolate import griddata
-
+import itertools
+from hgg.value_estimator import ValueEstimator
 class Visualizer:
     def __init__(self, dt_sampler):
         self.dt_sampler = dt_sampler
+        self.value_estimator : ValueEstimator  = dt_sampler.value_estimator
+        self.limits = self.dt_sampler.limits
 
     def visualize_value_heatmaps_for_debug(self, goals_predicted_during_training):
         dt_sampler = self.dt_sampler
-        combined_heatmap = dt_sampler.create_combined_np()
-        achieved_values, exploration_values, q_values, _ = dt_sampler.get_rescaled_rewards(combined_heatmap, None)
-        probability_loss_preds = dt_sampler.get_probability_loss_over_trajectory(combined_heatmap)
+        value_estimator = self.value_estimator
+
+        combined_heatmap = self.create_combined_np()
+        total_values, achieved_values, exploration_values, q_values = value_estimator.get_state_values(combined_heatmap, None)
         probability_preds = dt_sampler.get_probabilities_over_trajectory(combined_heatmap)
         
         fig_shape = (4, 3)
         fig, axs = plt.subplots(fig_shape[0], fig_shape[1], figsize=(16, 12), constrained_layout=True)  # 4 rows, 3 columns of subplots
         achieved_values = achieved_values.reshape(-1, 1)
         exploration_values = exploration_values.reshape(-1, 1)
-        probability_loss_preds = probability_loss_preds.reshape(-1, 1)
         probability_preds = probability_preds.reshape(-1, 1)
         q_values = q_values.reshape(-1, 1)
-
+        total_values = total_values.reshape(-1, 1)
         q_pos_val = np.hstack((combined_heatmap, q_values))
         aim_pos_val = np.hstack((combined_heatmap, achieved_values))
         expl_pos_val = np.hstack((combined_heatmap, exploration_values))
-        prob_loss_pos_val = np.hstack((combined_heatmap, probability_loss_preds))
         prob_pos_val = np.hstack((combined_heatmap, probability_preds))
-        combined_pos_val = np.hstack((combined_heatmap, (q_values + achieved_values + exploration_values)))
+        combined_pos_val = np.hstack((combined_heatmap, total_values))
 
         plot_dict = {
             "Q Heatmap": q_pos_val,
             "Aim Heatmap": aim_pos_val,
             "Explore Heatmap": expl_pos_val,
             "Combined Heatmap": combined_pos_val,
-            "Probability Loss Heatmap": prob_loss_pos_val,
             "Probability Heatmap": prob_pos_val
         }
 
@@ -64,7 +65,11 @@ class Visualizer:
         pos = (i // fig_shape[1], i % fig_shape[1])
         self.visualize_sampled_goals(axs[pos[0]][pos[1]])
 
-        plt.savefig(f'{dt_sampler.video_recorder.debug_dir}/combined_heatmaps_episode_{str(dt_sampler.episode)}.jpg')
+        i += 1
+        pos = (i // fig_shape[1], i % fig_shape[1])
+        self.visualize_sampled_trajectories(axs[pos[0]][pos[1]])
+
+        plt.savefig(f'{dt_sampler.video_recorder.visualization_dir}/combined_heatmaps_episode_{str(dt_sampler.episode)}.jpg')
         plt.close(fig)
 
     def plot_heatmap(self, data_points, ax, title):
@@ -82,7 +87,20 @@ class Visualizer:
         ax.set_ylim(-2, 10)
         ax.set_aspect('equal')  # Ensuring equal aspect ratio
         ax.grid(True)
+    def visualize_sampled_trajectories(self,ax):
+        dt_sampler = self.dt_sampler
+        x = dt_sampler.latest_achieved[0, :, 0]
+        y = dt_sampler.latest_achieved[0, :, 1]
+        scatter = ax.scatter(x, y, c = 'grey', edgecolor='k')
+        start_ends = dt_sampler.start_ends
+        colors = ['red', 'blue', 'green', 'purple', 'orange', 'yellow', 'pink', 'cyan', 'magenta', 'brown', 'black']
 
+        for i, (start, end) in enumerate(start_ends):
+            ax.plot(x[start:end], y[start:end], color=colors[i % len(colors)], linewidth=2)
+        ax.set_aspect('equal')  # Ensuring equal aspect ratio
+        ax.grid(True)
+        ax.set_xlim(-2, 10)
+        ax.set_ylim(-2, 10)
     def visualize_sampled_goals(self, ax):
         dt_sampler = self.dt_sampler
         sampled_goals = dt_sampler.sampled_goals
@@ -93,6 +111,8 @@ class Visualizer:
         cbar = ax.figure.colorbar(scatter, ax=ax, label='Time step')
         ax.set_aspect('equal')  # Ensuring equal aspect ratio
         ax.grid(True)
+
+
 
     def visualize_sampling_points(self, ax):
         dt_sampler = self.dt_sampler
@@ -192,3 +212,12 @@ class Visualizer:
         ax.set_ylim(-2, 10)
         ax.set_aspect('equal')  # Ensuring equal aspect ratio
         ax.grid(True)
+    def create_combined_np(self):
+        data_points = [
+            [x, y]
+            for x, y in itertools.product(
+                range(self.limits[0][0], self.limits[0][1] + 1),
+                range(self.limits[1][0], self.limits[1][1] + 1),
+            )
+        ]
+        return np.array(data_points, dtype=np.float32)

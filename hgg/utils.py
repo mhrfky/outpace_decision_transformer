@@ -134,27 +134,26 @@ def trajectory_similarity_loss(predicted_trajectory, actual_trajectory, alpha=0.
     total_loss = alpha * dtw_distance + beta * euclidean_distance + gamma * smoothness_reg
 
     return total_loss, dtw_distance, euclidean_distance, smoothness_reg
-def calculate_dynamic_threshold(rtgs, method='std'):
+def calculate_dynamic_threshold(rtgs, percentile=50):
     """
-    Calculate a dynamic threshold based on the RTG sequence.
+    Calculate a dynamic threshold based only on the increasing RTG sequence using a specified percentile.
     
     Parameters:
         rtgs (np.array): The sequence of return-to-go values.
-        method (str): Method to use for dynamic threshold calculation ('std', 'mean', etc.).
-        window_size (int): The number of recent RTG values to consider for dynamic threshold calculation.
+        percentile (float): The percentile to use for dynamic threshold calculation.
         
     Returns:
         float: The calculated dynamic threshold.
     """
-    if method == 'std':
-        threshold = np.std(rtgs)
-    elif method == 'mean':
-        threshold = np.mean(rtgs)
-    else:
-        raise ValueError("Unsupported method for dynamic threshold calculation.")
-    
+    # Filter only increasing segments
+    window_size = 5
+    conv_kernel = np.ones(window_size) / window_size
+    smoothed_rtgs = np.convolve(rtgs, conv_kernel, mode='same')
+    differences = np.abs(np.diff(smoothed_rtgs))
+    threshold = np.percentile(differences, percentile)
     return threshold
-def find_diminishing_trajectories(rtgs, length=10, base_threshold=0.01, dynamic_threshold=True, method='std'):
+
+def find_diminishing_trajectories(rtgs, length=10, base_threshold=0.01, dynamic_threshold=True, percentile=60):
     """
     Find the starting indices of diminishing trajectories in a sequence of RTGs.
     
@@ -163,8 +162,7 @@ def find_diminishing_trajectories(rtgs, length=10, base_threshold=0.01, dynamic_
         length (int): The length of the diminishing trajectory to find.
         base_threshold (float): The base threshold for determining a diminishing trajectory.
         dynamic_threshold (bool): Whether to use a dynamic threshold based on recent RTG values.
-        method (str): Method to use for dynamic threshold calculation ('std', 'mean', etc.).
-        window_size (int): The number of recent RTG values to consider for dynamic threshold calculation.
+        percentile (float): The percentile to use for dynamic threshold calculation.
         
     Returns:
         List of starting indices of diminishing trajectories.
@@ -173,7 +171,7 @@ def find_diminishing_trajectories(rtgs, length=10, base_threshold=0.01, dynamic_
         rtgs = np.array(rtgs)
         
     if dynamic_threshold:
-        threshold = calculate_dynamic_threshold(rtgs, method=method) 
+        threshold = calculate_dynamic_threshold(rtgs, percentile=percentile)
     else:
         threshold = base_threshold
     
@@ -181,13 +179,19 @@ def find_diminishing_trajectories(rtgs, length=10, base_threshold=0.01, dynamic_
     n = len(rtgs)
     counter = 0
     
-    for i in range(2, n-1): #TODO return it back to 1 and n-1 to n
+    for i in range(2, n-1):
         if rtgs[i] <= rtgs[i-1] + threshold:
             counter += 1
         else:
             counter = 0
 
         if counter >= length - 1:
-            diminishing_streaks.append(i - length + 1)
+            diminishing_streaks.append((i - length + 1, i - length +11))
             
     return diminishing_streaks
+
+
+
+def rescale_array(tensor, old_min, old_max, new_min =-1, new_max = 1):
+    rescaled_tensor = (tensor - old_min) / (old_max - old_min) * (new_max - new_min) + new_min
+    return rescaled_tensor

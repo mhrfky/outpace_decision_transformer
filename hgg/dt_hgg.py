@@ -5,9 +5,6 @@ import numpy as np
 from hgg.gcc_utils import gcc_load_lib, c_double, c_int
 import torch
 import torch.nn.functional as F
-import time
-import copy
-import itertools
 from dt.models.decision_transformer import DecisionTransformer
 import matplotlib.pyplot as plt
 from scipy.interpolate import griddata
@@ -22,81 +19,19 @@ from hgg.utils import euclid_distance
 from hgg.dt_hgg_visualizer import Visualizer
 from hgg.utils import trajectory_similarity_loss
 from hgg.utils import find_diminishing_trajectories
-class StatesBuffer:
-	def __init__(self, max_size=5000):
-		self.__list = np.array([[0, 0]])
-		self.max_size = max_size
-
-	def insert_trajectory(self, trajectory):
-		self.__list = np.vstack((trajectory, self.__list))[:self.max_size]
-
-	def insert_state(self, state):
-		self.__list = np.vstack((self.__list , np.array([state])))
-
-	def fill_list_with_states_near_a_point(self, init_state):
-		temp_list = np.tile(np.array([init_state], dtype = np.float64), (self.max_size,1))
-		temp_list += np.random.normal(loc=np.zeros_like(self.__list), scale=0.5*np.ones_like(self.__list))
-		self.__list = np.vstack((self.__list , temp_list))
-
-	def fill_list_with_random_around_maze(self, limits, sample_size ):
-		temp_list = generate_random_samples([limits[0][0], limits[1][0]], [limits[0][1], limits[1][1]], (2,) , sample_size)
-		self.__list = np.vstack((self.__list, temp_list))
-		pass #debug
-
-	def sample(self, batch_size=64):
-		sampled_elements = self.__list[np.random.choice(self.__list.shape[0], batch_size, replace=False)]
-		return sampled_elements
-	
-	def remove_states_near_the_trajectory(self, trajectory, threshold):
-		for state in trajectory:
-			self.remove_states_near_the_state(state, threshold)
-	def remove_states_near_other_sample(self, sample, threshold):
-		for state in sample:
-			self.remove_states_near_the_state(state, threshold)
-	def remove_states_near_the_state(self, state, threshold):
-		delete_indices = []
-		for i, s in enumerate(self.__list): #TODO rename
-			if euclid_distance(s,state) < threshold:
-				delete_indices.append(i)
-		self.__list = np.delete(self.__list, delete_indices, axis = 0)
-
-	def __len__(self):
-		return len(self.__list)
-		
-
-
-
-def rescale_array(tensor, old_min, old_max, new_min =-1, new_max = 1):
-    # rescaled_tensor = (tensor - old_min) / (old_max - old_min) * (new_max - new_min) + new_min
-    # return rescaled_tensor
-	return tensor
-
-def goal_distance(goal_a, goal_b):
-	return np.linalg.norm(goal_a - goal_b, ord=2)
-def goal_concat(obs, goal):
-	if type(obs) == torch.Tensor:
-		if type(goal) == torch.Tensor:
-			return torch.concat([obs, goal])
-		else:
-			goal = torch.tensor(goal, device = "cuda", dtype = torch.float32)
-			return torch.concat([obs, goal])
-	elif type(goal) == torch.Tensor:
-		obs = torch.tensor(obs, device = "cuda", dtype = torch.float32)
-		return torch.concat([obs, goal])
-	else:
-		return np.concatenate([obs, goal], axis=0)
-
-def discount_cumsum(x, gamma):
-	discount_cumsum = np.zeros_like(x)
-	discount_cumsum[-1] = x[-1]
-	for t in reversed(range(x.shape[0]-1)):
-		discount_cumsum[t] = x[t] + gamma * discount_cumsum[t+1]
-	return discount_cumsum
-
+from hgg.value_estimator import ValueEstimator
+from hgg.states_buffer import StatesBuffer
+from hgg.trajectory_buffer import TrajectoryBuffer
+from hgg.trajectory_sampler import identify_good_parts
+from hgg.trajectory_sampler import select_segment_indices
+from sampler_utils import shortest_path_trajectory, get_shortest_path_trajectories
+from video import VideoRecorder
+debug_loc_list = []
+debug_rtg_list = []
 class DTSampler:    
 	def __init__(self, goal_env, goal_eval_env, 				
 				agent = None,
-				add_noise_to_goal= False, beta = 1/20, gamma=1, device = 'cuda', critic = None, 
+				add_noise_to_goal= False, beta = 1, gamma=-1, sigma = 1, device = 'cuda', critic = None, 
 				dt : DecisionTransformer = None, rtg_optimizer = None, state_optimizer = None,
 				loss_fn  = torch.nn.MSELoss(),
 				video_recorder : VideoRecorder = None
@@ -107,7 +42,6 @@ class DTSampler:
 		
 		self.add_noise_to_goal = add_noise_to_goal
 		self.agent = agent
-		self.rtg_optimizer = rtg_optimizer
 		self.state_optimizer = state_optimizer
 		self.critic = critic
 
@@ -127,9 +61,8 @@ class DTSampler:
 		self.loss_fn = torch.nn.MSELoss()
 
 		self.dim = np.prod(self.env.convert_obs_to_dict(self.env.reset())['achieved_goal'].shape)
-		self.goal_distance = goal_distance
-		self.video_recorder = video_recorder
-		self.visualizer = Visualizer(self)	
+		self.video_recorder : VideoRecorder = video_recorder
+		
 		self.init_goal = self.eval_env.convert_obs_to_dict(self.eval_env.reset())['achieved_goal'].copy()
 		
 				
@@ -145,7 +78,6 @@ class DTSampler:
 		self.max_rewards_so_far = []
 		self.residual_goals_debug = []
 		self.number_of_trajectories_per_episode = 2
-		self.dumb_prevention_loss = MoveOntheLastPartLoss(threshold=4)
 
 		self.negatives_buffer = StatesBuffer()
 		self.bnn_model = BiggerNN(2,1).to(device)
@@ -155,149 +87,17 @@ class DTSampler:
 		self.positives_buffer = StatesBuffer(200)
 		self.positives_buffer.fill_list_with_random_around_maze(self.limits, 100)
 		self.sampled_goals = np.array([[0,0]])
-		pass # debug
+		self.trajectory_buffer = TrajectoryBuffer(100)
+
+		self.value_estimator = ValueEstimator(self.agent, self.eval_env, self.final_goal, self.num_seed_steps, self.init_goal, gamma, beta, sigma )
+		self.visualizer = Visualizer(self)	
 	def reward_to_rtg(self,rewards):
 		return rewards - rewards[-1]
 
 
-	def generate_achieved_values(self,init_state,achieved_goals):
-		# maybe for all timesteps in an episode
-		init_to_goal_pair	= 	[goal_concat(init_state, achieved_goals[j]) for  j in range(len(achieved_goals))] # list of [dim] (len = ts)
-		if type(init_to_goal_pair) is not torch.Tensor:
-			init_to_goal_pair = torch.tensor(init_to_goal_pair, device = "cuda", dtype = torch.float32)
-		goal_to_final_pair	= 	[goal_concat(achieved_goals[j], self.final_goal) for  j in range(len(achieved_goals))] # list of [dim] (len = ts) 																													# merge of achieved_pool and achieved_pool_init_state to draw trajectory
-		if type(goal_to_final_pair) is not torch.Tensor:
-			goal_to_final_pair = torch.tensor(goal_to_final_pair, device = "cuda", dtype = torch.float32)
-		with torch.no_grad(): ## when using no_grad, no gradients will be calculated or stored for operations on tensors, which can reduce memory usage and speed up computations							
-			values = -self.agent.aim_discriminator(init_to_goal_pair).detach().cpu().numpy()[:, 0] # TODO discover inside aim_discriminator,
-																							# 	* what kind of inputs it does require
-																							# 	* value can be interpreted as a measure of how desirable or advantageous the current state is from the perspective of achieving the final goal
-			# values += self.agent.aim_discriminator(goal_to_final_pair_t).detach().cpu().numpy()[:, 0] 
-				# value = np.clip(value, -1.0/(1.0-self.gamma), 0)
-		return values
-	def generate_achieved_values_t(self,init_state,achieved_goals):
-		# maybe for all timesteps in an episode
-		# Create a list of tensors by concatenating init_state and each achieved_goal
-		goal_pairs = [goal_concat(init_state, achieved_goals[j]) for j in range(len(achieved_goals))]
-
-		# Stack the list of tensors into a single tensor
-		init_to_goal_pair = torch.stack(goal_pairs).to(device='cuda', dtype=torch.float32)
-
-		if type(init_to_goal_pair)==torch.Tensor:
-			init_to_goal_pair = torch.tensor(init_to_goal_pair, device = "cuda", dtype = torch.float32)
-
-		goal_to_final_pair	= 	[goal_concat(achieved_goals[j], self.final_goal) for  j in range(len(achieved_goals))] # list of [dim] (len = ts) 																													# merge of achieved_pool and achieved_pool_init_state to draw trajectory
-		if type(goal_to_final_pair)==torch.Tensor:
-			goal_to_final_pair = torch.tensor(goal_to_final_pair, device = "cuda", dtype = torch.float32)
-
-		values = -self.agent.aim_discriminator(init_to_goal_pair)[:, 0] # TODO discover inside aim_discriminator,
-																							# 	* what kind of inputs it does require
-																							# 	* value can be interpreted as a measure of how desirable or advantageous the current state is from the perspective of achieving the final goal
-			# values += self.agent.aim_discriminator(goal_to_final_pair_t).detach().cpu().numpy()[:, 0] 
-				# value = np.clip(value, -1.0/(1.0-self.gamma), 0)
-		return values
-				
-	def get_q_values(self,goal_t):
-		goal = goal_t.detach().cpu().numpy()
-		obs_np = self.eval_env.reset()
-		self.eval_env.wrapped_env.set_xy(goal)
-		pos_xy_np = self.eval_env.wrapped_env.get_xy()
-		obs_np[:2] = pos_xy_np[:]
-		obs_np[6:8] = pos_xy_np[:]
-		with torch.no_grad():
-			obs_t = torch.tensor(obs_np, device = "cuda", dtype = torch.float32)
-			dist = self.agent.actor(obs_t)
-			action = dist.rsample()
-
-			q1, q2 = self.agent.critic(obs_t.unsqueeze(0), action.unsqueeze(0))
-
-			q_min = torch.min(q1,q2)
-			# q_mean = torch.mean(q1+q2)
-			# q_max = torch.max(q1,q2)
-		if  self.step > self.num_seed_steps:
-			return q1,q2
-		else: 
-			return torch.tensor([0], device = "cuda", dtype=torch.float32), torch.tensor([0], device = "cuda", dtype=torch.float32) #TODO zero is no go, either average the other rewards or pull the calculation of q_vals to start
-	def get_dir_of_agent(self, goal_t):
-		goal = goal_t.detach().cpu().numpy()
-	def calculate_exploration_value(self, init_pos, curr_pos):
-		epsilon = 1e-10  # Small value to prevent division by zero
-		if type(init_pos) == torch.Tensor:
-			numerator = torch.linalg.norm(curr_pos - init_pos)
-			denominator = torch.linalg.norm(torch.tensor(self.final_goal, device= "cuda") - curr_pos) + epsilon
-			value = torch.log(numerator + epsilon) - torch.log(denominator)
-
-			# value = numerator / denominator
-			return value			
-		else:
-			numerator = np.linalg.norm(curr_pos - init_pos)
-			denominator = np.linalg.norm(self.final_goal - curr_pos) + epsilon
-			value = np.log(numerator + epsilon) - np.log(denominator)
-
-			# value = numerator / denominator
-			return value
-	 
-
-	def shorten_trajectory(self, achieved_goals, rtgs):
-		achieved_goals = achieved_goals[::3]# list of reduced ts		)
-		rtgs = rtgs[::3]
-  
-		return achieved_goals, rtgs
-
-	def get_max_min_rewards(self, init_state):
-		q1_t, q2_t = self.get_q_values(torch.tensor(self.final_goal, device = "cuda", dtype = torch.float32))
-		q_val = np.min([q1_t.detach().cpu().numpy(), q2_t.detach().cpu().numpy()])
-		aim_val = self.generate_achieved_values(init_state, [self.final_goal])[0]
-		expl_val = self.calculate_exploration_value(init_state, self.final_goal)
-
-		max_aim 	= aim_val
-		max_expl	= expl_val
-		max_q		= q_val
-  
-		q1_t, q2_t = self.get_q_values(torch.tensor(init_state, device = "cuda", dtype = torch.float32))
-		q_val = np.min([q1_t.detach().cpu().numpy(), q2_t.detach().cpu().numpy()])
-		aim_val = self.generate_achieved_values(init_state, [init_state])[0]
-		expl_val = self.calculate_exploration_value(init_state, init_state)
-  
-		min_aim 	= aim_val
-		min_expl	= expl_val
-		min_q		= q_val
-
-		val_dict = {'max_aim' : max_aim,
-              		'min_aim' : min_aim,
-              		'max_expl' : max_expl,
-              		'min_expl' : min_expl,
-              		'max_q' : max_q + 1e-10 ,
-              		'min_q' : min_q - 1e-10 ,
-                }
-		return val_dict
-
-
-	def get_rescaled_rewards(self,achieved_goals, qs):
-		achieved_values= self.generate_achieved_values(self.init_goal,achieved_goals)
-		exploration_values = np.array([self.calculate_exploration_value(self.init_goal,achieved_goals[i]) for i in range(len(achieved_goals))])
-
-		val_dict = self.get_max_min_rewards(achieved_goals[0])
-		if qs is None:
-			qs = np.array([])
-			for pos in achieved_goals:
-				q1_t, q2_t = self.get_q_values(torch.tensor(pos, device="cuda", dtype=torch.float32))
-
-				q_min_t = torch.min(q1_t,q2_t)
-				q_min = q_min_t.detach().cpu().numpy()
-				qs = np.append(qs,q_min)
-		else:
-			qs = np.min(qs, axis= 1)
-
-		# achieved_values		=	rescale_array(achieved_values, val_dict['min_aim'], val_dict["max_aim"])
-		exploration_values	=	rescale_array(exploration_values, val_dict['min_expl'], val_dict["max_expl"])
-		q_values			=	rescale_array(qs, val_dict['min_q'], val_dict["max_q"])
-  
-		return achieved_values, exploration_values, q_values, val_dict
 
 	def get_positives(self,sample_size = 32):
 		positives = np.tile(np.array([self.final_goal], dtype = np.float64), (sample_size,1))
-		# positives += np.random.normal(loc=np.zeros_like(positives), scale=0.5*np.ones_like(positives))
 		return positives
 	
 
@@ -327,47 +127,97 @@ class DTSampler:
 
 
 	def update(self, step, episode, achieved_goals, actions, qs):
-		
-		if not len(qs):
-			qs = np.zeros((100,2))
+			
 		self.step = step
 		self.episode = episode
-		# achieved_goals_states = []
-		# # achieved_goals_velocity = []
-		# for state in achieved_goals:
-		# 	obs_dict = self.eval_env.convert_obs_to_dict(state)
-		# 	achieved_goals_states.append(obs_dict["achieved_goal"])
-		# 	# achieved_goals_velocity.append(obs_dict["observation"][-3:-1])
-		# achieved_goals_states = np.array(achieved_goals_states)
-		# # achieved_goals_velocity = np.array(achieved_goals_velocity)
+
 		achieved_goals_states = np.array([self.eval_env.convert_obs_to_dict(achieved_goals[i])["achieved_goal"] for i in range(len(achieved_goals))])
 		actions = np.array(actions)
 
-		achieved_values, exploration_values, q_values, min_max_val_dict = self.get_rescaled_rewards(achieved_goals_states, qs)
-		rewards = self.gamma * achieved_values + self.beta * q_values + self.sigma * exploration_values# either get the qs earlier than 2000 steps or remove gamma limitation before then
-
+		if not len(qs):
+			qs = np.zeros((100,2))
+		rewards, achieved_values, exploration_values, q_values = self.value_estimator.get_state_values(achieved_goals_states, qs)
 		rtgs = self.reward_to_rtg(rewards)
+		debug_loc_list.append(achieved_goals_states)
+		debug_rtg_list.append(rtgs)
 
-		starting_indexes = find_diminishing_trajectories(rtgs)
+		start_ends = find_diminishing_trajectories( rtgs, dynamic_threshold=True)
+		start_ends = select_segment_indices(rtgs, 10, 0, 0.01, 2)
+		self.start_ends = start_ends
+		trajectories = get_shortest_path_trajectories(achieved_goals_states, rtgs, 5)
+		
+		self.trajectory_buffer.add_trajectory(achieved_goals_states, actions, start_ends)
+		start_end_index = self.trajectory_buffer.sample(10)
+
+
 		self.latest_achieved 	= np.array([achieved_goals_states])
 		self.latest_acts        = actions
 		self.latest_rtgs 		= np.array([rtgs ])
 
-		self.negatives_buffer.insert_trajectory(achieved_goals_states)
 
 		self.max_achieved_reward = max(max(rewards),self.max_achieved_reward)
 		self.latest_qs = q_values
 		
+
+		self.negatives_buffer.insert_trajectory(achieved_goals_states)
 		self.positives_buffer.remove_states_near_other_sample(self.negatives_buffer.sample(len(self.negatives_buffer)//2), 0.5)
 		if len(self.positives_buffer) < 64 : #TODO make it class variable
 			self.positives_buffer.fill_list_with_random_around_maze(self.limits, 64 - len(self.positives_buffer)) # sample the same thing
 		
-		
-		# self.train_bnn(achieved_goals_states[-64:])
-		# self.train_single_trajectory(achieved_goals_states, actions, rtgs)
-		loss = self.train_with_increasing_states(achieved_goals_states, actions, rtgs, starting_indexes)
+	
+		loss = self.train(achieved_goals_states, actions, rtgs, start_end_index) #visualize this
+
 		self.max_rewards_so_far.append(max(rewards))
+
 		self.residual_goals_debug = []
+
+	def train(self, achieved_goals, actions, rtgs, start_end):
+		goals_predicted_debug_np = np.array([[0,0]])
+
+		# actions = torch.zeros((1, achieved_goals_t.size(1), 2), device="cuda", dtype=torch.float32)
+		timesteps = torch.arange(100, device="cuda").unsqueeze(0)
+		
+
+		for index, start, end in start_end:
+			achieved_goals = self.trajectory_buffer.get_trajectory_by_index(index)
+			actions = self.trajectory_buffer.get_acts_by_index(index)
+			
+			achieved_goals_t = torch.tensor([achieved_goals], device="cuda", dtype=torch.float32)
+			actions_t = torch.tensor([actions], device = "cuda", dtype = torch.float32)
+			rtgs_t,_,_,_ = self.value_estimator.get_state_values_t(achieved_goals_t) #TODO only get the values for the part of the trajectory 
+
+			temp_achieved = achieved_goals_t[:, :start].clone()
+			temp_actions = actions_t[:, :start].clone()
+			temp_timesteps = timesteps[:, :start].clone()
+
+			temp_rtg = rtgs_t[:, :start].clone()
+			temp_rtg -= rtgs_t[0,end]
+			temp_rtg = temp_rtg.unsqueeze(-1)
+
+			generated_states, generated_actions, generated_rtgs, generated_timesteps = self.generate_next_n_states(
+				temp_achieved, temp_actions, temp_rtg, temp_timesteps, n=end-start)
+
+			goals_predicted_debug_np = np.vstack((goals_predicted_debug_np, generated_states.squeeze(0)[-end+start:].detach().cpu().numpy()))
+			
+
+			expected_val = temp_rtg[0, 0, 0]
+			state_values, achieved_values_t, exploration_values_t, q_values_t = self.value_estimator.get_state_values_t(generated_states[:,start-end:,:])
+
+			goal_val_loss = torch.nn.L1Loss()(state_values, rtgs_t.squeeze(0)[start: end])
+			rtg_pred_loss = torch.nn.L1Loss()(generated_rtgs[:,start - end:], state_values)
+			similarity_loss, dtw_distance, euclidean_distance, smoothness_reg =  trajectory_similarity_loss(generated_states[:,start-end:,:], achieved_goals_t[0,start:end])
+			
+			state_reward = state_values.sum()
+
+			# Combine losses
+			total_loss =   dtw_distance + smoothness_reg -  state_reward + rtg_pred_loss + goal_val_loss
+			self.state_optimizer.zero_grad()
+			total_loss.backward(retain_graph=True)
+			torch.nn.utils.clip_grad_norm_(self.dt.parameters(), 0.25)
+			self.state_optimizer.step()
+
+		self.visualize_value_heatmaps_for_debug(goals_predicted_debug_np)
+		
 	def generate_next_n_states(self, achieved_states_t, actions_t, rtgs_t, timesteps_t, n=10):
 		if not isinstance(achieved_states_t, torch.Tensor):
 			achieved_states_t = torch.tensor(achieved_states_t, device="cuda", dtype=torch.float32)
@@ -392,93 +242,7 @@ class DTSampler:
 			timesteps_t = torch.concat((timesteps_t, torch.tensor([timesteps_t[0][-1] + 1], device="cuda").unsqueeze(0)), dim = 1)
 
 		return achieved_states_t, actions_t, rtgs_t, timesteps_t
-		
-	def get_state_values(self, achieved_goals):
-		achieved_values_t = self.generate_achieved_values_t(self.init_goal, achieved_goals[0])
-		exploration_values_t = torch.tensor([], device="cuda", dtype=torch.float32, requires_grad=True)
-		q_values_t = torch.tensor([], device="cuda", dtype=torch.float32, requires_grad=True)
-
-		init_goal_t = torch.tensor(self.init_goal, device="cuda", dtype=torch.float32)        
-
-		for i, state in enumerate(achieved_goals[0]):
-			exploration_value_t = self.calculate_exploration_value(init_goal_t, state)
-			exploration_value_t = exploration_value_t.unsqueeze(0)  # Add an extra dimension
-			exploration_values_t = torch.cat((exploration_values_t, exploration_value_t))
-
-			q1_t, q2_t = self.get_q_values(state)
-			q_val_t = torch.min(q1_t, q2_t)
-			q_val_t = q_val_t.unsqueeze(0)  # Add an extra dimension
-			q_values_t = torch.cat((q_values_t, q_val_t))
-		q_values_t = q_values_t.squeeze(1)
-		state_values = self.gamma * achieved_values_t + self.beta * q_values_t + self.sigma * exploration_values_t
-		return state_values, achieved_values_t, exploration_values_t, q_values_t
-
-
-	def train_with_increasing_states(self, achieved_goals, actions, rtgs, starting_indexes):
-		goals_predicted_debug_np = np.array([[0,0]])
-		
-		achieved_goals_t = torch.tensor([achieved_goals], device="cuda", dtype=torch.float32)
-		actions_t = torch.tensor([actions], device = "cuda", dtype = torch.float32)
-		rtgs_t = torch.tensor([rtgs], device="cuda", dtype=torch.float32)
-
-		# actions = torch.zeros((1, achieved_goals_t.size(1), 2), device="cuda", dtype=torch.float32)
-		timesteps = torch.arange(achieved_goals_t.size(1), device="cuda").unsqueeze(0)
-		
-
-		for starting_index in starting_indexes:
-			temp_achieved = achieved_goals_t[:, :starting_index].clone()
-			temp_actions = actions_t[:, :starting_index].clone()
-			temp_timesteps = timesteps[:, :starting_index].clone()
-
-			temp_rtg = rtgs_t[:, :starting_index].clone()
-			temp_rtg -= rtgs_t[0, starting_index + 10]
-			temp_rtg = temp_rtg.unsqueeze(-1)
-
-			generated_states, generated_actions, generated_rtgs, generated_timesteps = self.generate_next_n_states(
-				temp_achieved, temp_actions, temp_rtg, temp_timesteps, n=10)
-
-			goals_predicted_debug_np = np.vstack((goals_predicted_debug_np, generated_states.squeeze(0)[-10:].detach().cpu().numpy()))
-			
-
-			expected_val = temp_rtg[0, 0, 0]
-			state_values, achieved_values_t, exploration_values_t, q_values_t = self.get_state_values(generated_states[:,-10:,:])
-
-			goal_val_loss = torch.nn.L1Loss()(state_values, rtgs_t.squeeze(0)[-10:])
-			rtg_pred_loss = torch.nn.L1Loss()(generated_rtgs[:,-10:], state_values)
-			similarity_loss, dtw_distance, euclidean_distance, smoothness_reg =  trajectory_similarity_loss(generated_states[:,-10:,:], achieved_goals_t[0,starting_index:starting_index+10])
-			
-			state_reward = state_values.sum()
-
-			# Combine losses
-			total_loss =   dtw_distance * 0.5 + smoothness_reg * 0.3 - state_reward * 0.2
-
-			self.state_optimizer.zero_grad()
-			total_loss.backward(retain_graph=True)
-			torch.nn.utils.clip_grad_norm_(self.dt.parameters(), 0.25)
-			self.state_optimizer.step()
-
-		self.visualize_value_heatmaps_for_debug(goals_predicted_debug_np)
-
 	
-	def calculate_information_gain(self, state):
-		self.bnn_model.eval()
-		if type(state) is torch.Tensor:
-
-			state_t = state
-			with torch.no_grad():
-				outputs = [self.bnn_model(state_t) for _ in range(10)]
-				uncertainty_t = torch.stack(outputs).std(0).mean()
-			return uncertainty_t
-		else:
-			
-			state_t = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(self.device)
-
-			with torch.no_grad():
-				outputs = [self.bnn_model(state_t) for _ in range(10)]
-				uncertainty_t = torch.stack(outputs).std(0).mean().item()
-			return uncertainty_t
-
-		
 	def sample(self, episode_observes = None, episode_acts = None, qs = None):
 		if episode_observes is None or qs is None or episode_acts is None:
 			if self.latest_achieved is None:
@@ -499,8 +263,7 @@ class DTSampler:
 			achieved_goals_states = np.array([self.eval_env.convert_obs_to_dict(episode_observes[i])["achieved_goal"] for i in range(len(episode_observes))])
 			actions = np.array(episode_acts)
 
-			achieved_values, exploration_values, q_values, val_dict = self.get_rescaled_rewards(achieved_goals_states, qs)
-			rewards = self.gamma * achieved_values + self.beta * q_values + self.sigma * exploration_values# either get the qs earlier than 2000 steps or remove gamma limitation before then
+			rewards, achieved_values, exploration_values, q_values = self.value_estimator.get_state_values(achieved_goals_states, qs)
 			rtgs = self.reward_to_rtg(rewards)
    
 			achieved_goals_states_t = torch.tensor([achieved_goals_states], device="cuda", dtype=torch.float32)
@@ -543,15 +306,28 @@ class DTSampler:
 			else:
 				self.positives_buffer.insert_state(desired_goal.detach().cpu().numpy())
 				return desired_goal.detach()  # return the desired goal if within limits
+			
+	def get_state_values(self, achieved_goals):
+		achieved_values_t = self.value_estimator.generate_achieved_values_t(self.init_goal, achieved_goals[0])
+		exploration_values_t = torch.tensor([], device="cuda", dtype=torch.float32, requires_grad=True)
+		q_values_t = torch.tensor([], device="cuda", dtype=torch.float32, requires_grad=True)
 
-	def get_probability_loss_over_trajectory(self, trajectory):
-		probabilities = np.array([])
-		for achieved_goal in trajectory:
-			output = self.bnn_model(torch.tensor(achieved_goal, device = "cuda", dtype = torch.float32))
-			probability = torch.sigmoid(output)
-			uncertainty_loss = torch.abs(probability - 0.5)
-			probabilities = np.append(probabilities,uncertainty_loss.unsqueeze(0).detach().cpu().numpy())
-		return probabilities
+		init_goal_t = torch.tensor(self.init_goal, device="cuda", dtype=torch.float32)        
+
+		for i, state in enumerate(achieved_goals[0]):
+			exploration_value_t = self.value_estimator.calculate_exploration_value(init_goal_t, state)
+			exploration_value_t = exploration_value_t.unsqueeze(0)  # Add an extra dimension
+			exploration_values_t = torch.cat((exploration_values_t, exploration_value_t))
+
+			q1_t, q2_t = self.value_estimator.get_q_values(state)
+			q_val_t = torch.min(q1_t, q2_t)
+			q_val_t = q_val_t.unsqueeze(0)  # Add an extra dimension
+			q_values_t = torch.cat((q_values_t, q_val_t))
+		q_values_t = q_values_t.squeeze(1)
+		state_values_t = self.gamma * achieved_values_t + self.beta * q_values_t + self.sigma * exploration_values_t
+		return state_values_t, achieved_values_t, exploration_values_t, q_values_t
+
+
 	def get_probabilities_over_trajectory(self, trajectory):
 		probabilities = np.array([])
 		for achieved_goal in trajectory:
@@ -559,15 +335,7 @@ class DTSampler:
 			probability = torch.sigmoid(output)
 			probabilities = np.append(probabilities,probability.unsqueeze(0).detach().cpu().numpy())
 		return probabilities
-	def create_combined_np(self):
-		data_points = [
-			[x, y]
-			for x, y in itertools.product(
-				range(self.limits[0][0], self.limits[0][1] + 1),
-				range(self.limits[1][0], self.limits[1][1] + 1),
-			)
-		]
-		return np.array(data_points, dtype=np.float32)
+
 	def visualize_value_heatmaps_for_debug(self, goals_predicted_during_training):
 		self.visualizer.visualize_value_heatmaps_for_debug(goals_predicted_during_training)
 
