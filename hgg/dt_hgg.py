@@ -24,8 +24,8 @@ from hgg.states_buffer import StatesBuffer
 from hgg.trajectory_buffer import TrajectoryBuffer
 from hgg.trajectory_sampler import identify_good_parts
 from hgg.trajectory_sampler import select_segment_indices
-from sampler_utils import shortest_path_trajectory, get_shortest_path_trajectories
 from video import VideoRecorder
+from hgg.trajectory_reconstructor import TrajectoryReconstructor
 debug_loc_list = []
 debug_rtg_list = []
 class DTSampler:    
@@ -88,9 +88,13 @@ class DTSampler:
 		self.positives_buffer.fill_list_with_random_around_maze(self.limits, 100)
 		self.sampled_goals = np.array([[0,0]])
 		self.trajectory_buffer = TrajectoryBuffer(100)
+		self.trajectory_reconstructor = TrajectoryReconstructor()
 
 		self.value_estimator = ValueEstimator(self.agent, self.eval_env, self.final_goal, self.num_seed_steps, self.init_goal, gamma, beta, sigma )
 		self.visualizer = Visualizer(self)	
+		self.number_of_iterations = 60
+		self.debug_trajectories = []
+		self.residual_goal_rtg_increase = 1
 	def reward_to_rtg(self,rewards):
 		return rewards - rewards[-1]
 
@@ -130,7 +134,7 @@ class DTSampler:
 			
 		self.step = step
 		self.episode = episode
-
+		self.debug_trajectories = []
 		achieved_goals_states = np.array([self.eval_env.convert_obs_to_dict(achieved_goals[i])["achieved_goal"] for i in range(len(achieved_goals))])
 		actions = np.array(actions)
 
@@ -144,7 +148,6 @@ class DTSampler:
 		start_ends = find_diminishing_trajectories( rtgs, dynamic_threshold=True)
 		start_ends = select_segment_indices(rtgs, 10, 0, 0.01, 2)
 		self.start_ends = start_ends
-		trajectories = get_shortest_path_trajectories(achieved_goals_states, rtgs, 5)
 		
 		self.trajectory_buffer.add_trajectory(achieved_goals_states, actions, start_ends)
 		start_end_index = self.trajectory_buffer.sample(10)
@@ -165,57 +168,48 @@ class DTSampler:
 			self.positives_buffer.fill_list_with_random_around_maze(self.limits, 64 - len(self.positives_buffer)) # sample the same thing
 		
 	
-		loss = self.train(achieved_goals_states, actions, rtgs, start_end_index) #visualize this
+		loss = self.train(achieved_goals_states, rtgs) #visualize this
 
 		self.max_rewards_so_far.append(max(rewards))
 
 		self.residual_goals_debug = []
-
-	def train(self, achieved_goals, actions, rtgs, start_end):
+	def train(self, achieved_goals, rtgs):
 		goals_predicted_debug_np = np.array([[0,0]])
-
-		# actions = torch.zeros((1, achieved_goals_t.size(1), 2), device="cuda", dtype=torch.float32)
-		timesteps = torch.arange(100, device="cuda").unsqueeze(0)
 		
+		for trajectory, rtgs_t, traj_len in self.trajectory_reconstructor.get_shortest_path_trajectories_with_yield(achieved_goals, rtgs, top_n=50, n= 10):
+			self.debug_trajectories.append(trajectory[-traj_len:])
+			trajectory_t = torch.tensor(trajectory, device="cuda", dtype=torch.float32).unsqueeze(0)
+			rtgs_t = torch.tensor(rtgs_t, device="cuda", dtype=torch.float32).unsqueeze(0)
+			actions_t = torch.zeros((1, trajectory_t.size(1), 2), device="cuda", dtype=torch.float32)
+			timesteps_t = torch.arange(trajectory_t.size(1), device="cuda").unsqueeze(0)
 
-		for index, start, end in start_end:
-			achieved_goals = self.trajectory_buffer.get_trajectory_by_index(index)
-			actions = self.trajectory_buffer.get_acts_by_index(index)
-			
-			achieved_goals_t = torch.tensor([achieved_goals], device="cuda", dtype=torch.float32)
-			actions_t = torch.tensor([actions], device = "cuda", dtype = torch.float32)
-			rtgs_t,_,_,_ = self.value_estimator.get_state_values_t(achieved_goals_t) #TODO only get the values for the part of the trajectory 
+			input_achieved_t = trajectory_t[:, :-traj_len, :]
+			input_actions_t = actions_t[:, :-traj_len, :]
+			input_rtgs_t = rtgs_t[:, :-traj_len]
+			input_timesteps_t = timesteps_t[:, :-traj_len]
 
-			temp_achieved = achieved_goals_t[:, :start].clone()
-			temp_actions = actions_t[:, :start].clone()
-			temp_timesteps = timesteps[:, :start].clone()
-
-			temp_rtg = rtgs_t[:, :start].clone()
-			temp_rtg -= rtgs_t[0,end]
-			temp_rtg = temp_rtg.unsqueeze(-1)
+			input_rtgs_t = input_rtgs_t - rtgs_t[0, -1]
+			input_rtgs_t = input_rtgs_t.unsqueeze(-1)
 
 			generated_states, generated_actions, generated_rtgs, generated_timesteps = self.generate_next_n_states(
-				temp_achieved, temp_actions, temp_rtg, temp_timesteps, n=end-start)
+				input_achieved_t,input_actions_t,input_rtgs_t,input_timesteps_t, n=traj_len)
 
-			goals_predicted_debug_np = np.vstack((goals_predicted_debug_np, generated_states.squeeze(0)[-end+start:].detach().cpu().numpy()))
-			
+			goals_predicted_debug_np = np.vstack((goals_predicted_debug_np, generated_states.squeeze(0)[-traj_len:].detach().cpu().numpy()))
 
-			expected_val = temp_rtg[0, 0, 0]
-			state_values, achieved_values_t, exploration_values_t, q_values_t = self.value_estimator.get_state_values_t(generated_states[:,start-end:,:])
+			state_values, achieved_values_t, exploration_values_t, q_values_t = self.value_estimator.get_state_values_t(generated_states[:,-traj_len:,:])
 
-			goal_val_loss = torch.nn.L1Loss()(state_values, rtgs_t.squeeze(0)[start: end])
-			rtg_pred_loss = torch.nn.L1Loss()(generated_rtgs[:,start - end:], state_values)
-			similarity_loss, dtw_distance, euclidean_distance, smoothness_reg =  trajectory_similarity_loss(generated_states[:,start-end:,:], achieved_goals_t[0,start:end])
-			
+			goal_val_loss = torch.nn.L1Loss()(state_values, rtgs_t.squeeze(0)[-traj_len:])
+			rtg_pred_loss = torch.nn.L1Loss()(generated_rtgs[:,-traj_len:], state_values)
+			similarity_loss, dtw_distance, euclidean_distance, smoothness_reg =  trajectory_similarity_loss(generated_states[:,-traj_len:,:], trajectory_t[0,-traj_len:,:])
+
 			state_reward = state_values.sum()
 
-			# Combine losses
-			total_loss =   dtw_distance + smoothness_reg -  state_reward + rtg_pred_loss + goal_val_loss
+			total_loss = similarity_loss #- state_reward + rtg_pred_loss + goal_val_loss
 			self.state_optimizer.zero_grad()
 			total_loss.backward(retain_graph=True)
 			torch.nn.utils.clip_grad_norm_(self.dt.parameters(), 0.25)
 			self.state_optimizer.step()
-
+		
 		self.visualize_value_heatmaps_for_debug(goals_predicted_debug_np)
 		
 	def generate_next_n_states(self, achieved_states_t, actions_t, rtgs_t, timesteps_t, n=10):
@@ -251,8 +245,8 @@ class DTSampler:
 			actions_t = torch.tensor(self.latest_acts, device="cuda", dtype=torch.float32).unsqueeze(0)
 			rtgs_t = torch.tensor(self.latest_rtgs, device="cuda", dtype=torch.float32).unsqueeze(2)
 			achieved_goals_states_t = torch.tensor(self.latest_achieved, device="cuda", dtype=torch.float32)
-			generated_states, _,_,_ = 	self.generate_next_n_states(achieved_goals_states_t, actions_t, rtgs_t, torch.arange(achieved_goals_states_t.shape[1], device="cuda").unsqueeze(0), n = 10)
-			goal_t = generated_states[0,-1]
+			generated_states_t, _,_,_ = 	self.generate_next_n_states(achieved_goals_states_t, actions_t, rtgs_t, torch.arange(achieved_goals_states_t.shape[1], device="cuda").unsqueeze(0), n = 10)
+			goal_t = generated_states_t[0,-1]
 			# trajectories, rtgs = self.best_trajectories.get_elements()
 			# goal_t = self.generate_goal(episode_observes, rtgs[0] + self.return_to_add )
 			goal =  goal_t.detach().cpu().numpy()
@@ -267,11 +261,11 @@ class DTSampler:
 			rtgs = self.reward_to_rtg(rewards)
    
 			achieved_goals_states_t = torch.tensor([achieved_goals_states], device="cuda", dtype=torch.float32)
-			rtgs_t = torch.tensor([rtgs], device="cuda", dtype=torch.float32).unsqueeze(2)
+			rtgs_t = torch.tensor([rtgs], device="cuda", dtype=torch.float32).unsqueeze(2) + self.residual_goal_rtg_increase
 			actions_t = torch.tensor([actions], device="cuda", dtype=torch.float32)#.unsqueeze(0)
 
-			generated_states, _,_,_ = self.generate_next_n_states(achieved_goals_states_t, actions_t, rtgs_t, torch.arange(achieved_goals_states_t.shape[1], device="cuda").unsqueeze(0), n = 10)
-			goal_t = generated_states[0,-1]
+			generated_states_t, _,_,_ = self.generate_next_n_states(achieved_goals_states_t, actions_t, rtgs_t, torch.arange(achieved_goals_states_t.shape[1], device="cuda").unsqueeze(0), n = 10)
+			goal_t = generated_states_t[0,-1]
 			# goal_t = self.generate_goal(achieved_goals_states_t, rtgs_t + self.return_to_add)
 			goal =  goal_t.detach().cpu().numpy()
    

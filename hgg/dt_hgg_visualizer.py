@@ -92,11 +92,13 @@ class Visualizer:
         x = dt_sampler.latest_achieved[0, :, 0]
         y = dt_sampler.latest_achieved[0, :, 1]
         scatter = ax.scatter(x, y, c = 'grey', edgecolor='k')
-        start_ends = dt_sampler.start_ends
+        trajectories = dt_sampler.debug_trajectories
         colors = ['red', 'blue', 'green', 'purple', 'orange', 'yellow', 'pink', 'cyan', 'magenta', 'brown', 'black']
 
-        for i, (start, end) in enumerate(start_ends):
-            ax.plot(x[start:end], y[start:end], color=colors[i % len(colors)], linewidth=2)
+        for i, traj in enumerate(trajectories):
+            x = traj[:,0]
+            y = traj[:,1]
+            ax.plot(x , y, color=colors[i % len(colors)], linewidth=2)
         ax.set_aspect('equal')  # Ensuring equal aspect ratio
         ax.grid(True)
         ax.set_xlim(-2, 10)

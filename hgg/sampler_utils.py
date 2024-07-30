@@ -1,4 +1,3 @@
-import numpy as np
 from scipy.ndimage import uniform_filter1d
 from scipy.spatial.distance import euclidean
 import numpy as np
@@ -125,23 +124,30 @@ def create_graph(states, max_distance):
                 G.add_edge(i, j, weight=distance ** 2)
     return G
 
-def concat_original_with_new(states, new_trajectory, n):
+def concat_original_with_new(states, new_trajectory, n, rtgs, new_rtgs):
     nth_from_end = new_trajectory[-n]
     index = np.where(np.all(states == nth_from_end, axis=1))[0][0]
-    result_trajectory = np.concatenate((states[:index],new_trajectory[-n:]))
-    return result_trajectory
+    result_trajectory = np.concatenate((states[:index], new_trajectory[-n:]))
+    
+    # Adjust RTGs based on the new trajectory
+    result_rtgs = np.concatenate((rtgs[:index], new_rtgs[-n:]))
+    
+    return result_trajectory, result_rtgs
 
-def shortest_path_trajectory(states, end_index, max_distance):
+def shortest_path_trajectory(states, rtgs, end_index, max_distance):
     G = create_graph(states, max_distance)
     shortest_path_indices = nx.dijkstra_path(G, source=0, target=end_index, weight='weight')
     shortest_path_states = states[shortest_path_indices]
-    return shortest_path_states
+    shortest_path_rtgs = rtgs[shortest_path_indices]
+    return shortest_path_states, shortest_path_rtgs
 
-def get_shortest_path_trajectories(states, rtgs, top_n, max_distance =1):
+def get_shortest_path_trajectories(states, rtgs, top_n, max_distance=1, n=10):
     top_indices = np.argsort(rtgs)[-top_n:]
     trajectories = []
+    adjusted_rtgs = []
     for idx in top_indices:
-        new_trajectory = shortest_path_trajectory(states, idx, max_distance)
-        new_trajectory = concat_original_with_new(states, new_trajectory,10)
+        new_trajectory, new_rtgs = shortest_path_trajectory(states, rtgs, idx, max_distance)
+        new_trajectory, new_rtgs = concat_original_with_new(states, new_trajectory, n, rtgs, new_rtgs)
         trajectories.append(new_trajectory)
-    return np.array(trajectories)
+        adjusted_rtgs.append(new_rtgs)
+    return np.array(trajectories), np.array(adjusted_rtgs)

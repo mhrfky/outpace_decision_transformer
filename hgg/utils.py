@@ -195,3 +195,11 @@ def find_diminishing_trajectories(rtgs, length=10, base_threshold=0.01, dynamic_
 def rescale_array(tensor, old_min, old_max, new_min =-1, new_max = 1):
     rescaled_tensor = (tensor - old_min) / (old_max - old_min) * (new_max - new_min) + new_min
     return rescaled_tensor
+
+def calculate_max_distance(positions):
+    max_distance = 0
+    for i in range(len(positions) - 1):
+        distance = np.linalg.norm(positions[i+1] - positions[i])
+        if distance > max_distance:
+            max_distance = distance
+    return max_distance
