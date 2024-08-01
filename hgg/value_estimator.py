@@ -1,6 +1,6 @@
 import torch 
 import numpy as np
-
+from playground2 import time_decorator
 def goal_concat(obs, goal):
 	if type(obs) == torch.Tensor:
 		if type(goal) == torch.Tensor:
@@ -92,6 +92,7 @@ class ValueEstimator:
 
             # value = numerator / denominator
             return value
+        
     def get_state_values_t(self, achieved_goals):
         achieved_values_t = self.generate_achieved_values_t(self.init_goal, achieved_goals[0])
         exploration_values_t = torch.tensor([], device="cuda", dtype=torch.float32, requires_grad=True)

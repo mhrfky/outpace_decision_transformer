@@ -18,3 +18,9 @@ outpace_decision_transformer.code-workspace
 a.png
 playground.py
 .vscode/launch.json
+*/*.png
+*.png
+playground*
+*experiment*
+*.npy
+*.json

@@ -10,6 +10,7 @@ class Visualizer:
         self.dt_sampler = dt_sampler
         self.value_estimator : ValueEstimator  = dt_sampler.value_estimator
         self.limits = self.dt_sampler.limits
+        self.history_of_number_of_states_in_reconstructor = np.array([]).reshape(0, 1)
 
     def visualize_value_heatmaps_for_debug(self, goals_predicted_during_training):
         dt_sampler = self.dt_sampler
@@ -29,7 +30,6 @@ class Visualizer:
         q_pos_val = np.hstack((combined_heatmap, q_values))
         aim_pos_val = np.hstack((combined_heatmap, achieved_values))
         expl_pos_val = np.hstack((combined_heatmap, exploration_values))
-        prob_pos_val = np.hstack((combined_heatmap, probability_preds))
         combined_pos_val = np.hstack((combined_heatmap, total_values))
 
         plot_dict = {
@@ -37,13 +37,14 @@ class Visualizer:
             "Aim Heatmap": aim_pos_val,
             "Explore Heatmap": expl_pos_val,
             "Combined Heatmap": combined_pos_val,
-            "Probability Heatmap": prob_pos_val
         }
 
         for i, (key, heatmap) in enumerate(plot_dict.items()):
             pos = (i // fig_shape[1], i % fig_shape[1])
             self.plot_heatmap(heatmap, axs[pos[0]][pos[1]], key)
-            axs[pos[0]][pos[1]].scatter(goals_predicted_during_training[:, 0], goals_predicted_during_training[:, 1], c=np.arange(len(goals_predicted_during_training)), cmap="gist_heat", s=10)
+
+        axs[pos[0]][pos[1]].scatter(goals_predicted_during_training[:, 0], goals_predicted_during_training[:, 1], c=np.arange(len(goals_predicted_during_training)), cmap="gist_heat", s=10)
+
 
         i += 1
         pos = (i // fig_shape[1], i % fig_shape[1])
@@ -59,15 +60,22 @@ class Visualizer:
 
         i += 1
         pos = (i // fig_shape[1], i % fig_shape[1])
-        self.visualize_sampling_points(axs[pos[0]][pos[1]])
-
-        i += 1
-        pos = (i // fig_shape[1], i % fig_shape[1])
         self.visualize_sampled_goals(axs[pos[0]][pos[1]])
 
         i += 1
         pos = (i // fig_shape[1], i % fig_shape[1])
         self.visualize_sampled_trajectories(axs[pos[0]][pos[1]])
+
+        i += 1
+        pos = (i // fig_shape[1], i % fig_shape[1])
+        ax = axs[pos[0]][pos[1]]
+        self.history_of_number_of_states_in_reconstructor = np.vstack((self.history_of_number_of_states_in_reconstructor, np.array([len(dt_sampler.trajectory_reconstructor.states)])))
+        x = np.arange(0, len( self.history_of_number_of_states_in_reconstructor ))
+        ax.plot(x,  self.history_of_number_of_states_in_reconstructor , label='Trend', marker='.', markersize=5, linestyle='-', linewidth=2)
+        ax.set_xlabel('x')
+        ax.set_ylabel('reward')
+        ax.set_title('Max Rewards')
+
 
         plt.savefig(f'{dt_sampler.video_recorder.visualization_dir}/combined_heatmaps_episode_{str(dt_sampler.episode)}.jpg')
         plt.close(fig)
@@ -89,8 +97,8 @@ class Visualizer:
         ax.grid(True)
     def visualize_sampled_trajectories(self,ax):
         dt_sampler = self.dt_sampler
-        x = dt_sampler.latest_achieved[0, :, 0]
-        y = dt_sampler.latest_achieved[0, :, 1]
+        x = dt_sampler.trajectory_reconstructor.states[ :, 0]
+        y = dt_sampler.trajectory_reconstructor.states[ :, 1]
         scatter = ax.scatter(x, y, c = 'grey', edgecolor='k')
         trajectories = dt_sampler.debug_trajectories
         colors = ['red', 'blue', 'green', 'purple', 'orange', 'yellow', 'pink', 'cyan', 'magenta', 'brown', 'black']
@@ -154,7 +162,14 @@ class Visualizer:
             residual_goals_np = np.array(dt_sampler.residual_goals_debug)
             res_x = residual_goals_np[:, 0]
             res_y = residual_goals_np[:, 1]
-            ax.scatter(res_x, res_y, color='blue', marker='x', s=100, label='Latest Desired Goal')
+            res_t = np.arange(0, len(res_x))
+            ax.scatter(res_x, res_y, c=res_t, cmap = "cool", marker='x', s=100, label='Latest Desired Goal')
+        if len(dt_sampler.sampled_states):
+            sampled_states_np = np.array(dt_sampler.sampled_states)
+            sampled_x = sampled_states_np[:, 0]
+            sampled_y = sampled_states_np[:, 1]
+            sampled_t = np.arange(0, len(sampled_x))
+            ax.scatter(sampled_x, sampled_y, c=sampled_t, cmap = "plasma", marker='+', s=100)
         ax.scatter(dt_sampler.latest_desired_goal[0], dt_sampler.latest_desired_goal[1], color='red', marker='x', s=100, label='Latest Desired Goal')
 
         cbar = ax.figure.colorbar(scatter, ax=ax, label='Time step')
@@ -180,7 +195,8 @@ class Visualizer:
             residual_goals_np = np.array(dt_sampler.residual_goals_debug)
             res_x = residual_goals_np[:, 0]
             res_y = residual_goals_np[:, 1]
-            ax.scatter(res_x, res_y, color='blue', marker='x', s=100, label='Latest Desired Goal')
+            res_t = np.arange(0, len(res_x))
+            ax.scatter(res_x, res_y, c=res_t, cmap = "cool", marker='x', s=100, label='Latest Desired Goal')
         cbar = ax.figure.colorbar(scatter, ax=ax, label='RTG')
 
         ax.set_xlabel('X Position')
@@ -191,35 +207,11 @@ class Visualizer:
         ax.set_aspect('equal')  # Ensuring equal aspect ratio
         ax.grid(True)
 
-    def visualize_trajectories_on_qs(self, ax, title='Position Over Qs'):
-        dt_sampler = self.dt_sampler
-        x = dt_sampler.latest_achieved[0, :, 0]
-        y = dt_sampler.latest_achieved[0, :, 1]
-        qs = dt_sampler.latest_qs
-
-        scatter = ax.scatter(x, y, c=qs, cmap='viridis', edgecolor='k')
-        ax.scatter(dt_sampler.latest_desired_goal[0], dt_sampler.latest_desired_goal[1], color='red', marker='x', s=100, label='Latest Desired Goal')
-
-        if len(dt_sampler.residual_goals_debug):
-            residual_goals_np = np.array(dt_sampler.residual_goals_debug)
-            res_x = residual_goals_np[:, 0]
-            res_y = residual_goals_np[:, 1]
-            ax.scatter(res_x, res_y, color='blue', marker='x', s=100, label='Latest Desired Goal')
-        cbar = ax.figure.colorbar(scatter, ax=ax, label='Q value')
-
-        ax.set_xlabel('X Position')
-        ax.set_ylabel('Y Position')
-        ax.set_title(title)
-        ax.set_xlim(-2, 10)
-        ax.set_ylim(-2, 10)
-        ax.set_aspect('equal')  # Ensuring equal aspect ratio
-        ax.grid(True)
     def create_combined_np(self):
-        data_points = [
-            [x, y]
-            for x, y in itertools.product(
-                range(self.limits[0][0], self.limits[0][1] + 1),
-                range(self.limits[1][0], self.limits[1][1] + 1),
-            )
-        ]
-        return np.array(data_points, dtype=np.float32)
+        # Generate data points using itertools.product to create a grid within specified limits
+        x_range = np.arange(self.limits[0][0], self.limits[0][1] + 0.1, 0.1)
+        y_range = np.arange(self.limits[1][0], self.limits[1][1] + 0.1, 0.1)
+        
+        data_points = np.array([[x, y] for x, y in itertools.product(x_range, y_range)], dtype=np.float32)
+        
+        return data_points
