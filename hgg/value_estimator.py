@@ -43,12 +43,14 @@ class ValueEstimator:
         goal_pairs = [goal_concat(init_state, achieved_goals[j]) for j in range(len(achieved_goals))]
         init_to_goal_pair = torch.stack(goal_pairs).to(device='cuda', dtype=torch.float32)
 
-        if type(init_to_goal_pair)==torch.Tensor:
+        if not isinstance(init_to_goal_pair, torch.Tensor):
             init_to_goal_pair = torch.tensor(init_to_goal_pair, device = "cuda", dtype = torch.float32)
 
-        goal_to_final_pair	= 	[goal_concat(achieved_goals[j], self.final_goal) for  j in range(len(achieved_goals))] # list of [dim] (len = ts) 																													# merge of achieved_pool and achieved_pool_init_state to draw trajectory
-        if type(goal_to_final_pair)==torch.Tensor:
-            goal_to_final_pair = torch.tensor(goal_to_final_pair, device = "cuda", dtype = torch.float32)
+        goal_to_final_pair = [goal_concat(achieved_goals[j], self.final_goal) for j in range(len(achieved_goals))]
+        if not isinstance(goal_to_final_pair[0], torch.Tensor):  # Check if the elements are tensors
+            goal_to_final_pair = torch.tensor(goal_to_final_pair, device="cuda", dtype=torch.float32)
+        else:
+            goal_to_final_pair = torch.stack(goal_to_final_pair).to(device="cuda", dtype=torch.float32)
 
         values = -self.agent.aim_discriminator(init_to_goal_pair)[:, 0] # TODO discover inside aim_discriminator,
                                                                                             # 	* what kind of inputs it does require
@@ -71,10 +73,8 @@ class ValueEstimator:
             q1, q2 = self.agent.critic(obs_t.unsqueeze(0), action.unsqueeze(0))
 
             q_min = torch.min(q1,q2)
-            # q_mean = torch.mean(q1+q2)
-            # q_max = torch.max(q1,q2)
+
         return q1,q2
-            # return torch.tensor([0], device = "cuda", dtype=torch.float32), torch.tensor([0], device = "cuda", dtype=torch.float32) #TODO zero is no go, either average the other rewards or pull the calculation of q_vals to start
 
     def calculate_exploration_value(self, init_pos, curr_pos):
         epsilon = 1e-10  # Small value to prevent division by zero
@@ -84,14 +84,14 @@ class ValueEstimator:
             value = torch.log(numerator + epsilon) - torch.log(denominator)
 
             # value = numerator / denominator
-            return value			
+            return numerator-denominator	
         else:
             numerator = np.linalg.norm(curr_pos - init_pos)
             denominator = np.linalg.norm(self.final_goal - curr_pos) + epsilon
             value = np.log(numerator + epsilon) - np.log(denominator)
 
             # value = numerator / denominator
-            return value
+            return numerator-denominator
         
     def get_state_values_t(self, achieved_goals):
         achieved_values_t = self.generate_achieved_values_t(self.init_goal, achieved_goals[0])

@@ -13,7 +13,7 @@ class StatesBuffer:
 		self.__list = np.vstack((self.__list , np.array([state])))
 
 	def fill_list_with_states_near_a_point(self, init_state):
-		temp_list = np.tile(np.array([init_state], dtype = np.float64), (self.max_size,1))
+		temp_list = np.tile(np.array([init_state], dtype = np.float32), (self.max_size,1))
 		temp_list += np.random.normal(loc=np.zeros_like(self.__list), scale=0.5*np.ones_like(self.__list))
 		self.__list = np.vstack((self.__list , temp_list))
 

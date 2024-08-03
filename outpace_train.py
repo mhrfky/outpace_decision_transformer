@@ -22,6 +22,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from hgg.hgg import goal_distance
 from visualize.visualize_2d import *
+from playground2 import time_decorator
 torch.backends.cudnn.benchmark = True
 
 class UniformFeasibleGoalSampler:
@@ -230,7 +231,7 @@ class Workspace(object):
         dt = DecisionTransformer(state_dim = 2,
                                  act_dim= 2,
                                  max_length = 128, 
-                                 max_ep_len=128,
+                                 max_ep_len= 128,
                                  hidden_size = 128,
                                  n_layer = 3, # TODO check this out
                                  n_head = 1, #TODO check this out
@@ -702,12 +703,13 @@ class Workspace(object):
                     if info.get('is_current_goal_success'):
                         if (self.cfg.use_uncertainty_for_randomwalk not in [None, 'none', 'None']) and self.step > self.get_agent().meta_test_sample_size:
                             # residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
-                            residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
+                            # residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
+                            residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
 
                         else:
-                            residual_goal = self.get_residual_goal_with_NML(obs)
-                            residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
-                        
+                            # residual_goal = self.get_residual_goal_with_NML(obs)
+                            # residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
+                            residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
                         self.env.reset_goal(residual_goal)
                         obs[-self.env.goal_dim:] = residual_goal.copy()
                 else:
@@ -716,7 +718,8 @@ class Workspace(object):
                         if (self.cfg.use_uncertainty_for_randomwalk not in [None, 'none', 'None']) and self.step > self.get_agent().meta_test_sample_size:
                             residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
                         else:
-                            residual_goal = self.get_residual_goal_with_NML(obs)
+                            # residual_goal = self.get_residual_goal_with_NML(obs)
+                            residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
 
                         self.env.reset_goal(residual_goal)
                         obs[-self.env.goal_dim:] = residual_goal.copy()

@@ -5,26 +5,25 @@ import matplotlib.pyplot as plt
 from scipy.interpolate import griddata
 import itertools
 from hgg.value_estimator import ValueEstimator
+from playground2 import time_decorator
 class Visualizer:
     def __init__(self, dt_sampler):
         self.dt_sampler = dt_sampler
         self.value_estimator : ValueEstimator  = dt_sampler.value_estimator
         self.limits = self.dt_sampler.limits
         self.history_of_number_of_states_in_reconstructor = np.array([]).reshape(0, 1)
-
+    
     def visualize_value_heatmaps_for_debug(self, goals_predicted_during_training):
         dt_sampler = self.dt_sampler
         value_estimator = self.value_estimator
 
         combined_heatmap = self.create_combined_np()
         total_values, achieved_values, exploration_values, q_values = value_estimator.get_state_values(combined_heatmap, None)
-        probability_preds = dt_sampler.get_probabilities_over_trajectory(combined_heatmap)
         
         fig_shape = (4, 3)
         fig, axs = plt.subplots(fig_shape[0], fig_shape[1], figsize=(16, 12), constrained_layout=True)  # 4 rows, 3 columns of subplots
         achieved_values = achieved_values.reshape(-1, 1)
         exploration_values = exploration_values.reshape(-1, 1)
-        probability_preds = probability_preds.reshape(-1, 1)
         q_values = q_values.reshape(-1, 1)
         total_values = total_values.reshape(-1, 1)
         q_pos_val = np.hstack((combined_heatmap, q_values))
@@ -76,6 +75,14 @@ class Visualizer:
         ax.set_ylabel('reward')
         ax.set_title('Max Rewards')
 
+        i += 1
+        pos = (i // fig_shape[1], i % fig_shape[1])
+        ax = axs[pos[0]][pos[1]]
+        traj_lens = self.dt_sampler.debug_traj_lens
+        ax.hist(traj_lens, bins=40, range=(0, 40))
+        ax.set_xlabel('Trajectory Length')
+        ax.set_ylabel('Frequency')
+        ax.set_title('Histogram of Trajectory Lengths')
 
         plt.savefig(f'{dt_sampler.video_recorder.visualization_dir}/combined_heatmaps_episode_{str(dt_sampler.episode)}.jpg')
         plt.close(fig)
@@ -101,16 +108,18 @@ class Visualizer:
         y = dt_sampler.trajectory_reconstructor.states[ :, 1]
         scatter = ax.scatter(x, y, c = 'grey', edgecolor='k')
         trajectories = dt_sampler.debug_trajectories
-        colors = ['red', 'blue', 'green', 'purple', 'orange', 'yellow', 'pink', 'cyan', 'magenta', 'brown', 'black']
+        colors = ['red', 'blue', 'green', 'purple', 'orange', 'yellow', 'pink', 'cyan', 'magenta', 'brown']
 
         for i, traj in enumerate(trajectories):
             x = traj[:,0]
             y = traj[:,1]
-            ax.plot(x , y, color=colors[i % len(colors)], linewidth=2)
+            ax.plot(x , y, color=colors[i % len(colors)], linewidth=1)
+            ax.scatter(traj[-1,0], traj[-1,1], color = 'red', edgecolor = 'k')
         ax.set_aspect('equal')  # Ensuring equal aspect ratio
         ax.grid(True)
         ax.set_xlim(-2, 10)
         ax.set_ylim(-2, 10)
+        ax.set_title('Sampled Trajectories')
     def visualize_sampled_goals(self, ax):
         dt_sampler = self.dt_sampler
         sampled_goals = dt_sampler.sampled_goals
@@ -208,10 +217,11 @@ class Visualizer:
         ax.grid(True)
 
     def create_combined_np(self):
-        # Generate data points using itertools.product to create a grid within specified limits
-        x_range = np.arange(self.limits[0][0], self.limits[0][1] + 0.1, 0.1)
-        y_range = np.arange(self.limits[1][0], self.limits[1][1] + 0.1, 0.1)
-        
-        data_points = np.array([[x, y] for x, y in itertools.product(x_range, y_range)], dtype=np.float32)
-        
-        return data_points
+        data_points = [
+            [x, y]
+            for x, y in itertools.product(
+                range(self.limits[0][0], self.limits[0][1] + 1),
+                range(self.limits[1][0], self.limits[1][1] + 1),
+            )
+        ]
+        return np.array(data_points, dtype=np.float32)

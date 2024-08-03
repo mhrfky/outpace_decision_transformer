@@ -122,7 +122,7 @@ def trajectory_similarity_loss(predicted_trajectory, actual_trajectory, alpha=0.
     Custom loss function for trajectory similarity.
     """
     # Compute the Soft-DTW loss
-    dtw_distance = soft_dtw_loss(predicted_trajectory, actual_trajectory.unsqueeze(0)).mean()
+    dtw_distance = soft_dtw_loss(predicted_trajectory.unsqueeze(0), actual_trajectory.unsqueeze(0)).mean()
 
     # Euclidean distance loss
     euclidean_distance = torch.mean(torch.norm(predicted_trajectory - actual_trajectory, dim=1))

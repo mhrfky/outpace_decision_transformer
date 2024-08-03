@@ -15,6 +15,7 @@ from hgg.trajectory_buffer import TrajectoryBuffer
 from video import VideoRecorder
 from hgg.trajectory_reconstructor import TrajectoryReconstructor
 from hgg.utils import calculate_max_distance
+from playground2 import time_decorator
 
 debug_loc_list = []
 debug_rtg_list = []
@@ -54,7 +55,10 @@ class DTSampler:
 		
 		self.init_goal = self.eval_env.convert_obs_to_dict(self.eval_env.reset())['achieved_goal'].copy()
 		
-				
+		self.path_similarity_loss = trajectory_similarity_loss
+		self.rtg_pred_loss = torch.nn.L1Loss()
+		self.goal_val_loss = torch.nn.L1Loss()
+		
 		self.final_goal = np.array([0,8]) #TODO make this parametrized
 		self.latest_achieved = None
 		self.dt = dt
@@ -74,11 +78,13 @@ class DTSampler:
 		self.visualizer = Visualizer(self)	
 		self.number_of_iterations = 60
 		self.debug_trajectories = []
+		self.debug_traj_lens = []
 		self.residual_goal_rtg_increase = 1
+		self.log_every_n_times =  1
 	def reward_to_rtg(self,rewards):
 		return rewards - rewards[-1]
 
-
+	@time_decorator
 	def update(self, step, episode, achieved_goals, actions, qs):
 			
 		self.step = step
@@ -103,19 +109,22 @@ class DTSampler:
 		self.max_achieved_reward = max(max(rewards),self.max_achieved_reward)
 		self.latest_qs = q_values
 
-		loss = self.train(achieved_states, rtgs) #visualize this
-
+		goals_predicted_debug_np = self.train(achieved_states, rtgs) #visualize this
+		if self.episode % self.log_every_n_times == 0:
+			self.visualize_value_heatmaps_for_debug(goals_predicted_debug_np)
 		self.max_rewards_so_far.append(max(rewards))
 
 		self.residual_goals_debug = np.array([]).reshape(0,2)
 		self.sampled_states = np.array([]).reshape(0,2)
+		self.debug_traj_lens = []
 		# self.sampled_goals = np.array([]).reshape(0,2)
-
+	@time_decorator
 	def train(self, achieved_states, rtgs):
 		goals_predicted_debug_np = np.array([[0,0]])
 		max_distance = calculate_max_distance(achieved_states)	
 		for trajectory, rtgs_t, traj_len in self.trajectory_reconstructor.get_shortest_path_trajectories_with_yield(achieved_states, rtgs, top_n=50, eval_fn = self.value_estimator.get_state_values, n= 10, max_distance=max_distance):
 			self.debug_trajectories.append(trajectory[-traj_len:])
+			self.debug_traj_lens.append(traj_len)
 			trajectory_t = torch.tensor(trajectory, device="cuda", dtype=torch.float32).unsqueeze(0)
 			rtgs_t = torch.tensor(rtgs_t, device="cuda", dtype=torch.float32).unsqueeze(0)
 			actions_t = torch.zeros((1, trajectory_t.size(1), 2), device="cuda", dtype=torch.float32)
@@ -134,21 +143,24 @@ class DTSampler:
 
 			goals_predicted_debug_np = np.vstack((goals_predicted_debug_np, generated_states.squeeze(0)[-traj_len:].detach().cpu().numpy()))
 
-			state_values, achieved_values_t, exploration_values_t, q_values_t = self.value_estimator.get_state_values_t(generated_states[:,-traj_len:,:])
+			state_values, achieved_values_t, exploration_values_t, q_values_t = self.value_estimator.get_state_values_t(generated_states[:,-traj_len-1:,:])
+			# state_values = state_values[:,1:]
 
-			goal_val_loss = torch.nn.L1Loss()(state_values, rtgs_t.squeeze(0)[-traj_len:])
-			rtg_pred_loss = torch.nn.L1Loss()(generated_rtgs[:,-traj_len:], state_values)
-			similarity_loss, dtw_distance, euclidean_distance, smoothness_reg =  trajectory_similarity_loss(generated_states[:,-traj_len:,:], trajectory_t[0,-traj_len:,:])
 
-			state_reward = state_values.sum()
-
-			total_loss = similarity_loss  + rtg_pred_loss + goal_val_loss
+			goal_val_loss = torch.nn.L1Loss()(state_values[:,1:], rtgs_t[:,-traj_len:])
+			rtg_pred_loss = torch.nn.L1Loss()(generated_rtgs[:,-traj_len:].squeeze(-1), state_values[:,1:])
+			similarity_loss, dtw_distance, euclidean_distance, smoothness_reg =  trajectory_similarity_loss(generated_states[:,-traj_len:,:].squeeze(0), trajectory_t[0,-traj_len:,:])
+			q_gain_rewards_t = torch.diff(q_values_t)
+			state_val_gain_rewards_t =  torch.diff(state_values)
+			# 1 + 0.4 + 1 + 1 + 2
+			total_loss = similarity_loss + rtg_pred_loss + goal_val_loss - torch.mean(q_gain_rewards_t)#dtw_distance +  0.4 * smoothness_reg  +  rtg_pred_loss +   goal_val_loss - q_values_t.mean()
 			self.state_optimizer.zero_grad()
 			total_loss.backward(retain_graph=True)
 			torch.nn.utils.clip_grad_norm_(self.dt.parameters(), 0.25)
 			self.state_optimizer.step()
-		
-		self.visualize_value_heatmaps_for_debug(goals_predicted_debug_np)
+		# print(f"episode : {self.episode}, {len(self.debug_traj_lens)} trajectories generated and trained on this iteration")
+		return goals_predicted_debug_np
+	@time_decorator
 	def generate_next_n_states(self, achieved_states_t, actions_t, rtgs_t, timesteps_t, n=10):
 		if not isinstance(achieved_states_t, torch.Tensor):
 			achieved_states_t = torch.tensor(achieved_states_t, device="cuda", dtype=torch.float32)
@@ -173,7 +185,7 @@ class DTSampler:
 			timesteps_t = torch.concat((timesteps_t, torch.tensor([timesteps_t[0][-1] + 1], device="cuda").unsqueeze(0)), dim = 1)
 
 		return achieved_states_t, actions_t, rtgs_t, timesteps_t
-	
+	@time_decorator
 	def sample(self, episode_observes = None, episode_acts = None, qs = None):
 		if episode_observes is None or qs is None or episode_acts is None:
 			if self.latest_achieved is None:
@@ -208,6 +220,7 @@ class DTSampler:
    
 			self.latest_desired_goal = goal
 			self.residual_goals_debug = np.concatenate((self.residual_goals_debug, generated_states[-10:]))
+			print(f"Residual goal generated in episode: {self.episode}")
 
 			return goal
 
@@ -237,7 +250,7 @@ class DTSampler:
 			else:
 				self.positives_buffer.insert_state(desired_goal.detach().cpu().numpy())
 				return desired_goal.detach()  # return the desired goal if within limits
-
+	@time_decorator
 	def visualize_value_heatmaps_for_debug(self, goals_predicted_during_training):
 		self.visualizer.visualize_value_heatmaps_for_debug(goals_predicted_during_training)
 
