@@ -104,23 +104,28 @@ class DTSampler:
 		debug_rtg_list.append(rtgs)
 
 		self.latest_achieved 	= np.array([achieved_states])
-		self.latest_acts        = actions
+		self.latest_acts        = np.array([actions])
 		self.latest_rtgs 		= np.array([rtgs ])
 
-
+		
 		self.max_achieved_reward = max(max(rewards),self.max_achieved_reward)
 		self.latest_qs = q_values
 
 		goals_predicted_debug_np = self.train(achieved_states, rtgs) #visualize this
 		if self.episode % self.log_every_n_times == 0:
-			self.visualize_value_heatmaps_for_debug(goals_predicted_debug_np)
+			proclaimed_states, _ , proclaimed_rtgs, _ = self.generate_next_n_states(self.latest_achieved[:,:20], self.latest_acts[:,:20], np.expand_dims(self.latest_rtgs[:,:20],axis=-1), torch.arange(20, device="cuda").unsqueeze(0), n = 90)
+			proclaimed_states = proclaimed_states.squeeze(0).detach().cpu().numpy() 
+			proclaimed_rtgs = proclaimed_rtgs.squeeze(0).detach().cpu().numpy()
+			self.visualize_value_heatmaps_for_debug(goals_predicted_debug_np, proclaimed_states, proclaimed_rtgs)
 			self.residual_this_episode = False
 		self.max_rewards_so_far.append(max(rewards))
 
 		self.residual_goals_debug = np.array([]).reshape(0,2)
 		self.sampled_states = np.array([]).reshape(0,2)
 		self.debug_traj_lens = []
+
 		# self.sampled_goals = np.array([]).reshape(0,2)
+
 	@time_decorator
 	def train(self, achieved_states, rtgs):
 		goals_predicted_debug_np = np.array([[0,0]])
@@ -146,16 +151,16 @@ class DTSampler:
 
 			goals_predicted_debug_np = np.vstack((goals_predicted_debug_np, generated_states.squeeze(0)[-traj_len:].detach().cpu().numpy()))
 
-			state_values, achieved_values_t, exploration_values_t, q_values_t = self.value_estimator.get_state_values_t(generated_states[:,-traj_len-1:,:])
+			state_values_t, achieved_values_t, exploration_values_t, q_values_t = self.value_estimator.get_state_values_t(generated_states[:,-traj_len-1:,:])
+			rtg_values_t = self.reward_to_rtg(state_values_t)
 
-
-			goal_val_loss = torch.nn.L1Loss()(state_values[:,1:], rtgs_t[:,-traj_len:])
-			rtg_pred_loss = torch.nn.L1Loss()(generated_rtgs[:,-traj_len:].squeeze(-1), state_values[:,1:])
+			goal_val_loss = torch.nn.L1Loss()(rtg_values_t[:,1:], rtgs_t[:,-traj_len:])
+			rtg_pred_loss = torch.nn.L1Loss()(generated_rtgs[:,-traj_len:].squeeze(-1), rtg_values_t[:,1:])
 			similarity_loss, dtw_distance, euclidean_distance, smoothness_reg =  trajectory_similarity_loss(generated_states[:,-traj_len:,:].squeeze(0), trajectory_t[0,-traj_len:,:])
 			q_gain_rewards_t = torch.diff(q_values_t)
-			state_val_gain_rewards_t =  torch.diff(state_values)
+			state_val_gain_rewards_t =  torch.diff(state_values_t)
 			# 1 + 0.4 + 1 + 1 + 2
-			total_loss = dtw_distance + smoothness_reg * 0.3 + rtg_pred_loss + goal_val_loss -  2 * torch.mean(q_gain_rewards_t)#dtw_distance +  0.4 * smoothness_reg  +  rtg_pred_loss +   goal_val_loss - q_values_t.mean()
+			total_loss = dtw_distance + smoothness_reg * 0.3 + rtg_pred_loss + goal_val_loss -  2* torch.mean(state_val_gain_rewards_t)#dtw_distance +  0.4 * smoothness_reg  +  rtg_pred_loss +   goal_val_loss - q_values_t.mean()
 			self.state_optimizer.zero_grad()
 			total_loss.backward(retain_graph=True)
 			torch.nn.utils.clip_grad_norm_(self.dt.parameters(), 0.25)
@@ -193,7 +198,7 @@ class DTSampler:
 			if self.latest_achieved is None:
 				return np.array([0,8])
 			# goal_t =  self.generate_goal(self.latest_achieved,self.latest_rtgs + self.return_to_add)
-			actions_t = torch.tensor(self.latest_acts, device="cuda", dtype=torch.float32).unsqueeze(0)
+			actions_t = torch.tensor(self.latest_acts, device="cuda", dtype=torch.float32)
 			rtgs_t = torch.tensor(self.latest_rtgs, device="cuda", dtype=torch.float32).unsqueeze(2)
 			achieved_goals_states_t = torch.tensor(self.latest_achieved, device="cuda", dtype=torch.float32)
 			generated_states_t, _,_,_ = 	self.generate_next_n_states(achieved_goals_states_t, actions_t, rtgs_t, torch.arange(achieved_goals_states_t.shape[1], device="cuda").unsqueeze(0), n = 10)
@@ -253,6 +258,6 @@ class DTSampler:
 				self.positives_buffer.insert_state(desired_goal.detach().cpu().numpy())
 				return desired_goal.detach()  # return the desired goal if within limits
 	@time_decorator
-	def visualize_value_heatmaps_for_debug(self, goals_predicted_during_training):
-		self.visualizer.visualize_value_heatmaps_for_debug(goals_predicted_during_training)
+	def visualize_value_heatmaps_for_debug(self, goals_predicted_during_training, proclaimed_states, proclaimed_rtgs):
+		self.visualizer.visualize_value_heatmaps_for_debug(goals_predicted_during_training, proclaimed_states, proclaimed_rtgs)
 
