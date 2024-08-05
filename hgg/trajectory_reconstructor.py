@@ -62,16 +62,17 @@ class TrajectoryReconstructor:
 
         self.add_trajectory(states, max_distance)
         rewards = eval_fn(self.states, None)[0]
-        top_indices = np.argsort(rewards)[-top_n:]
+        top_indices = np.argsort(rewards)[-n:]
         random_indices = np.random.choice(top_indices, size=n, replace=False)
-        top_indices = random_indices
+        # top_indices = random_indices
         for idx in top_indices:
             for i in range(self.states.shape[0]-100 + 20, self.states.shape[0], 10):
                 start_index = i
                 new_trajectory, new_rewards = self.shortest_path_trajectory(rewards, start_index, idx)
-                len_traj = len(new_trajectory)
                 if new_trajectory is None or len(new_trajectory) < 1 :
                     continue
+                len_traj = len(new_trajectory)
+
                 if  len(new_trajectory) >= 20:  # Check for no path or very short path
                     new_trajectory = new_trajectory[:20]
                     new_rewards = new_rewards[:20]
@@ -81,9 +82,9 @@ class TrajectoryReconstructor:
                 yield new_trajectory, new_rtgs, len_traj
             
         if len(self.states) >= self.buffer_size:
-            self.merge_states_using_kmeans()
+            self.merge_states_using_kmeans(max_distance)
     @time_decorator
-    def merge_states_using_kmeans(self):
+    def merge_states_using_kmeans(self, max_distance):
         """Merge densely clustered states using K-means and keep isolated points to maintain expansiveness."""
         kmeans = KMeans(n_clusters=self.n_clusters, random_state=0).fit(self.states)
         labels = kmeans.labels_
@@ -99,9 +100,10 @@ class TrajectoryReconstructor:
         # Compute distances between centroids and add edges
         for i in range(self.n_clusters):
             for j in range(i + 1, self.n_clusters):
-                if i != j:
-                    distance = np.linalg.norm(new_states[i] - new_states[j])
-                    new_graph.add_edge(i, j, weight=distance ** 2)  # Use squared distance for consistency
+                distance = np.linalg.norm(new_states[i] - new_states[j])
+
+                if i != j and distance <= max_distance:
+                    new_graph.add_edge(i, j, weight=distance )  # Use squared distance for consistency
 
         # Update the states and graph
         self.states = new_states

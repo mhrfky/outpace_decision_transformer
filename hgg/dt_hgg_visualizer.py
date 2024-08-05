@@ -65,15 +65,15 @@ class Visualizer:
         pos = (i // fig_shape[1], i % fig_shape[1])
         self.visualize_sampled_trajectories(axs[pos[0]][pos[1]])
 
-        i += 1
-        pos = (i // fig_shape[1], i % fig_shape[1])
-        ax = axs[pos[0]][pos[1]]
-        self.history_of_number_of_states_in_reconstructor = np.vstack((self.history_of_number_of_states_in_reconstructor, np.array([len(dt_sampler.trajectory_reconstructor.states)])))
-        x = np.arange(0, len( self.history_of_number_of_states_in_reconstructor ))
-        ax.plot(x,  self.history_of_number_of_states_in_reconstructor , label='Trend', marker='.', markersize=5, linestyle='-', linewidth=2)
-        ax.set_xlabel('x')
-        ax.set_ylabel('reward')
-        ax.set_title('Max Rewards')
+        # i += 1
+        # pos = (i // fig_shape[1], i % fig_shape[1])
+        # ax = axs[pos[0]][pos[1]]
+        # self.history_of_number_of_states_in_reconstructor = np.vstack((self.history_of_number_of_states_in_reconstructor, np.array([len(dt_sampler.trajectory_reconstructor.states)])))
+        # x = np.arange(0, len( self.history_of_number_of_states_in_reconstructor ))
+        # ax.plot(x,  self.history_of_number_of_states_in_reconstructor , label='Trend', marker='.', markersize=5, linestyle='-', linewidth=2)
+        # ax.set_xlabel('x')
+        # ax.set_ylabel('reward')
+        # ax.set_title('Max Rewards')
 
         i += 1
         pos = (i // fig_shape[1], i % fig_shape[1])
@@ -83,6 +83,16 @@ class Visualizer:
         ax.set_xlabel('Trajectory Length')
         ax.set_ylabel('Frequency')
         ax.set_title('Histogram of Trajectory Lengths')
+
+        i += 1
+        pos = (i // fig_shape[1], i % fig_shape[1])
+        self.plot_residuals_if_exists(axs[pos[0]][pos[1]])
+
+        i += 1
+        pos = (i // fig_shape[1], i % fig_shape[1])
+        self.plot_residuals_till_now(axs[pos[0]][pos[1]])
+
+        
 
         plt.savefig(f'{dt_sampler.video_recorder.visualization_dir}/combined_heatmaps_episode_{str(dt_sampler.episode)}.jpg')
         plt.close(fig)
@@ -167,20 +177,16 @@ class Visualizer:
 
         t_normalized = (t - t.min()) / (t.max() - t.min())
         scatter = ax.scatter(x, y, c=t_normalized, cmap='viridis', edgecolor='k')
-        if len(dt_sampler.residual_goals_debug):
-            residual_goals_np = np.array(dt_sampler.residual_goals_debug)
-            res_x = residual_goals_np[:, 0]
-            res_y = residual_goals_np[:, 1]
-            res_t = np.arange(0, len(res_x))
-            ax.scatter(res_x, res_y, c=res_t, cmap = "cool", marker='x', s=100, label='Latest Desired Goal')
+      
         if len(dt_sampler.sampled_states):
             sampled_states_np = np.array(dt_sampler.sampled_states)
             sampled_x = sampled_states_np[:, 0]
             sampled_y = sampled_states_np[:, 1]
             sampled_t = np.arange(0, len(sampled_x))
-            ax.scatter(sampled_x, sampled_y, c=sampled_t, cmap = "plasma", marker='+', s=100)
+            # ax.scatter(sampled_x, sampled_y, c=sampled_t, cmap = "plasma", marker='+', s=100)
         ax.scatter(dt_sampler.latest_desired_goal[0], dt_sampler.latest_desired_goal[1], color='red', marker='x', s=100, label='Latest Desired Goal')
-
+        circle = plt.Circle((dt_sampler.latest_desired_goal[0], dt_sampler.latest_desired_goal[1]), 0.5, fill=False, edgecolor='black')
+        ax.add_patch(circle)
         cbar = ax.figure.colorbar(scatter, ax=ax, label='Time step')
 
         ax.set_xlabel('X Position')
@@ -200,17 +206,39 @@ class Visualizer:
         scatter = ax.scatter(x, y, c=rtgs, cmap='viridis', edgecolor='k')
         ax.scatter(dt_sampler.latest_desired_goal[0], dt_sampler.latest_desired_goal[1], color='red', marker='x', s=100, label='Latest Desired Goal')
 
-        if len(dt_sampler.residual_goals_debug):
-            residual_goals_np = np.array(dt_sampler.residual_goals_debug)
-            res_x = residual_goals_np[:, 0]
-            res_y = residual_goals_np[:, 1]
-            res_t = np.arange(0, len(res_x))
-            ax.scatter(res_x, res_y, c=res_t, cmap = "cool", marker='x', s=100, label='Latest Desired Goal')
+        # if len(dt_sampler.residual_goals_debug):
+        #     residual_goals_np = np.array(dt_sampler.residual_goals_debug)
+        #     res_x = residual_goals_np[:, 0]
+        #     res_y = residual_goals_np[:, 1]
+        #     res_t = np.arange(0, len(res_x))
+            # ax.scatter(res_x, res_y, c=res_t, cmap = "cool", marker='x', s=300, label='Latest Desired Goal')
         cbar = ax.figure.colorbar(scatter, ax=ax, label='RTG')
 
         ax.set_xlabel('X Position')
         ax.set_ylabel('Y Position')
         ax.set_title(title)
+        ax.set_xlim(-2, 10)
+        ax.set_ylim(-2, 10)
+        ax.set_aspect('equal')  # Ensuring equal aspect ratio
+        ax.grid(True)
+    def plot_residuals_if_exists(self, ax):
+        if len(self.dt_sampler.residual_goals_debug):
+            achieved_states_np = np.array(self.dt_sampler.residual_goals_debug)[0]
+            residual_goals_np = np.array(self.dt_sampler.residual_goals_debug)[1]
+            ax.scatter(self.dt_sampler.latest_desired_goal[0], self.dt_sampler.latest_desired_goal[1], c='green', s = 100, marker = '+', label='Achieved States')
+            ax.scatter(achieved_states_np[:, 0], achieved_states_np[:, 1], c='blue', s = 20, label='Achieved States')
+            ax.scatter(residual_goals_np[:, 0], residual_goals_np[:, 1], c = np.arange(len(residual_goals_np)), s = 5, cmap='viridis', label='Residual Goals')
+            ax.scatter(residual_goals_np[-1, 0], residual_goals_np[-1, 1], color='red', marker = 'x', s=100, label='Final Residual Goal')
+            ax.set_title('Residual Trajectory')
+            ax.set_xlim(-2, 10)
+            ax.set_ylim(-2, 10)
+            ax.set_aspect('equal')  # Ensuring equal aspect ratio
+            ax.grid(True)
+    def plot_residuals_till_now(self,ax):
+        x = self.dt_sampler.residuals_till_now[:,0]
+        y = self.dt_sampler.residuals_till_now[:,1]
+        ax.scatter(x, y, c = np.arange(len(x)), cmap='viridis', label='Residual Goals', edgecolor='k')
+        ax.set_title('Residual Goals Till Now')
         ax.set_xlim(-2, 10)
         ax.set_ylim(-2, 10)
         ax.set_aspect('equal')  # Ensuring equal aspect ratio

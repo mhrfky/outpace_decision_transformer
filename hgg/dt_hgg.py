@@ -58,7 +58,7 @@ class DTSampler:
 		self.path_similarity_loss = trajectory_similarity_loss
 		self.rtg_pred_loss = torch.nn.L1Loss()
 		self.goal_val_loss = torch.nn.L1Loss()
-		
+
 		self.final_goal = np.array([0,8]) #TODO make this parametrized
 		self.latest_achieved = None
 		self.dt = dt
@@ -74,13 +74,15 @@ class DTSampler:
 		self.trajectory_buffer = TrajectoryBuffer(100)
 		self.trajectory_reconstructor = TrajectoryReconstructor()
 
-		self.value_estimator = ValueEstimator(self.agent, self.eval_env, self.final_goal, self.num_seed_steps, self.init_goal, gamma, beta, sigma )
+		self.value_estimator = ValueEstimator(self.agent, self.eval_env, self.final_goal, self.num_seed_steps, self.init_goal, gamma, beta, sigma , rescale= True)
 		self.visualizer = Visualizer(self)	
 		self.number_of_iterations = 60
 		self.debug_trajectories = []
 		self.debug_traj_lens = []
 		self.residual_goal_rtg_increase = 1
 		self.log_every_n_times =  1
+		self.residual_this_episode = False
+		self.residuals_till_now = np.array([]).reshape(0,2)
 	def reward_to_rtg(self,rewards):
 		return rewards - rewards[-1]
 
@@ -94,7 +96,7 @@ class DTSampler:
 		actions = np.array(actions)
 
 		if not len(qs):
-			qs = np.zeros((100,2))
+			qs = np.zeros((100,2), dtype=float)
 		rewards, achieved_values, exploration_values, q_values = self.value_estimator.get_state_values(achieved_states, qs)
 		rtgs = self.reward_to_rtg(rewards)
 
@@ -112,6 +114,7 @@ class DTSampler:
 		goals_predicted_debug_np = self.train(achieved_states, rtgs) #visualize this
 		if self.episode % self.log_every_n_times == 0:
 			self.visualize_value_heatmaps_for_debug(goals_predicted_debug_np)
+			self.residual_this_episode = False
 		self.max_rewards_so_far.append(max(rewards))
 
 		self.residual_goals_debug = np.array([]).reshape(0,2)
@@ -144,7 +147,6 @@ class DTSampler:
 			goals_predicted_debug_np = np.vstack((goals_predicted_debug_np, generated_states.squeeze(0)[-traj_len:].detach().cpu().numpy()))
 
 			state_values, achieved_values_t, exploration_values_t, q_values_t = self.value_estimator.get_state_values_t(generated_states[:,-traj_len-1:,:])
-			# state_values = state_values[:,1:]
 
 
 			goal_val_loss = torch.nn.L1Loss()(state_values[:,1:], rtgs_t[:,-traj_len:])
@@ -153,7 +155,7 @@ class DTSampler:
 			q_gain_rewards_t = torch.diff(q_values_t)
 			state_val_gain_rewards_t =  torch.diff(state_values)
 			# 1 + 0.4 + 1 + 1 + 2
-			total_loss = similarity_loss + rtg_pred_loss + goal_val_loss - torch.mean(q_gain_rewards_t)#dtw_distance +  0.4 * smoothness_reg  +  rtg_pred_loss +   goal_val_loss - q_values_t.mean()
+			total_loss = dtw_distance + smoothness_reg * 0.3 + rtg_pred_loss + goal_val_loss -  2 * torch.mean(q_gain_rewards_t)#dtw_distance +  0.4 * smoothness_reg  +  rtg_pred_loss +   goal_val_loss - q_values_t.mean()
 			self.state_optimizer.zero_grad()
 			total_loss.backward(retain_graph=True)
 			torch.nn.utils.clip_grad_norm_(self.dt.parameters(), 0.25)
@@ -204,25 +206,25 @@ class DTSampler:
 			self.sampled_states = np.concatenate((self.sampled_states, generated_states[-10:]))
 			return goal
 		else:
-			achieved_goals_states = np.array([self.eval_env.convert_obs_to_dict(episode_observes[i])["achieved_goal"] for i in range(len(episode_observes))])
+			states = np.array([self.eval_env.convert_obs_to_dict(episode_observes[i])["achieved_goal"] for i in range(len(episode_observes))])
 			actions = np.array(episode_acts)
 
-			rewards, achieved_values, exploration_values, q_values = self.value_estimator.get_state_values(achieved_goals_states, qs)
+			rewards, achieved_values, exploration_values, q_values = self.value_estimator.get_state_values(states, qs)
 			rtgs = self.reward_to_rtg(rewards)
    
-			achieved_goals_states_t = torch.tensor([achieved_goals_states], device="cuda", dtype=torch.float32)
+			achieved_goals_states_t = torch.tensor([states], device="cuda", dtype=torch.float32)
 			rtgs_t = torch.tensor([rtgs], device="cuda", dtype=torch.float32).unsqueeze(2) + self.residual_goal_rtg_increase
 			actions_t = torch.tensor([actions], device="cuda", dtype=torch.float32)#.unsqueeze(0)
-
-			generated_states_t, _,_,_ = self.generate_next_n_states(achieved_goals_states_t, actions_t, rtgs_t, torch.arange(achieved_goals_states_t.shape[1], device="cuda").unsqueeze(0), n = 10)
+			n = 110 - achieved_goals_states_t.shape[1]
+			generated_states_t, _,_,_ = self.generate_next_n_states(achieved_goals_states_t, actions_t, rtgs_t, torch.arange(achieved_goals_states_t.shape[1], device="cuda").unsqueeze(0), n = n)
 			generated_states = generated_states_t.squeeze(0).detach().cpu().numpy()
 			goal = generated_states[-1]
-   
-			self.latest_desired_goal = goal
-			self.residual_goals_debug = np.concatenate((self.residual_goals_debug, generated_states[-10:]))
-			print(f"Residual goal generated in episode: {self.episode}")
+			self.residual_this_episode = True
+			self.residual_goals_debug = np.array([generated_states[:-n],generated_states[-n:]])
+			self.residuals_till_now = np.vstack((self.residuals_till_now, [goal]))
+			print(f"Residual goal generated in episode: {self.episode} in the step : {110 -n }")
 
-			return goal
+			return goal 
 
 
 	def generate_goal(self, achieved_goals, rtgs):

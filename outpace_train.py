@@ -636,7 +636,7 @@ class Workspace(object):
                 episode += 1
                 episode_observes = []
                 episode_acts     = []
-                qs = []
+                qs = np.array([]).reshape(0,2)
 
                 self.logger.log('train/episode', episode, self.step)
 
@@ -660,7 +660,7 @@ class Workspace(object):
             logging_dict = agent.update(replay_buffer, self.randomwalk_buffer, self.aim_expl_buffer, self.step, self.env, self.goal_buffer)
             
 
-            qs.append([logging_dict.get('q1', 0), logging_dict.get('q2', 0)])         
+            qs = np.vstack((qs ,[logging_dict.get('q1', 0), logging_dict.get('q2', 0)]))         
             if self.step % self.cfg.logging_frequency== 0:                
                 if logging_dict is not None: # when step = 0                                        
                     for key, val in logging_dict.items():
@@ -686,7 +686,7 @@ class Workspace(object):
                 
             if last_timestep:
                 self.last_timestep_save(episode_observes, replay_buffer)
-                qs = np.array(qs)
+                qs = np.array(qs, dtype = float)
                 self.dt_sampler_update(self.step, episode, episode_observes, episode_acts, qs)
 
                 
@@ -703,23 +703,31 @@ class Workspace(object):
                     if info.get('is_current_goal_success'):
                         if (self.cfg.use_uncertainty_for_randomwalk not in [None, 'none', 'None']) and self.step > self.get_agent().meta_test_sample_size:
                             # residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
-                            # residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
-                            residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
+                            qs = np.array(qs, dtype = float)
+                            residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
+                            # residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
 
                         else:
                             # residual_goal = self.get_residual_goal_with_NML(obs)
-                            # residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
-                            residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
+                            qs = np.array(qs, dtype = float)
+                            residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
+                            # residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
                         self.env.reset_goal(residual_goal)
                         obs[-self.env.goal_dim:] = residual_goal.copy()
                 else:
                     if info.get('is_current_goal_success'): #succeed original goal
                         self.env.original_goal_success = True
                         if (self.cfg.use_uncertainty_for_randomwalk not in [None, 'none', 'None']) and self.step > self.get_agent().meta_test_sample_size:
-                            residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
+                            qs = np.array(qs, dtype = float)
+                            residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
+
+                            # residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
                         else:
+                            qs = np.array(qs, dtype = float)
+                            residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
+
                             # residual_goal = self.get_residual_goal_with_NML(obs)
-                            residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
+                            # residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
 
                         self.env.reset_goal(residual_goal)
                         obs[-self.env.goal_dim:] = residual_goal.copy()
