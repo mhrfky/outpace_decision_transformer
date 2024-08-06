@@ -13,7 +13,7 @@ class Visualizer:
         self.limits = self.dt_sampler.limits
         self.history_of_number_of_states_in_reconstructor = np.array([]).reshape(0, 1)
     
-    def visualize_value_heatmaps_for_debug(self, goals_predicted_during_training):
+    def visualize_value_heatmaps_for_debug(self, goals_predicted_during_training, predicted_states, predicted_rtgs):
         dt_sampler = self.dt_sampler
         value_estimator = self.value_estimator
 
@@ -78,15 +78,23 @@ class Visualizer:
         i += 1
         pos = (i // fig_shape[1], i % fig_shape[1])
         ax = axs[pos[0]][pos[1]]
-        traj_lens = self.dt_sampler.debug_traj_lens
-        ax.hist(traj_lens, bins=40, range=(0, 40))
-        ax.set_xlabel('Trajectory Length')
-        ax.set_ylabel('Frequency')
-        ax.set_title('Histogram of Trajectory Lengths')
+        ax.scatter(predicted_states[:20, 0], predicted_states[:20, 1], c=np.arange(len(predicted_states[:20,:])), cmap='viridis', edgecolor='k')
+        ax.scatter(predicted_states[20:, 0], predicted_states[20:, 1], c=np.arange(len(predicted_states[20:,:])), cmap='viridis', edgecolor='k')
+
+        ax.set_title('Proclaimed Trajectory')
+        ax.set_xlim(-2, 10)
+        ax.set_ylim(-2, 10)
+        ax.set_aspect('equal')  # Ensuring equal aspect ratio
+        ax.grid(True)
+        # traj_lens = self.dt_sampler.debug_traj_lens
+        # ax.hist(traj_lens, bins=40, range=(0, 40))
+        # ax.set_xlabel('Trajectory Length')
+        # ax.set_ylabel('Frequency')
+        # ax.set_title('Histogram of Trajectory Lengths')
 
         i += 1
         pos = (i // fig_shape[1], i % fig_shape[1])
-        self.plot_residuals_if_exists(axs[pos[0]][pos[1]])
+        # self.plot_residuals_if_exists(axs[pos[0]][pos[1]])
 
         i += 1
         pos = (i // fig_shape[1], i % fig_shape[1])
@@ -178,13 +186,11 @@ class Visualizer:
         t_normalized = (t - t.min()) / (t.max() - t.min())
         scatter = ax.scatter(x, y, c=t_normalized, cmap='viridis', edgecolor='k')
       
-        if len(dt_sampler.sampled_states):
-            sampled_states_np = np.array(dt_sampler.sampled_states)
-            sampled_x = sampled_states_np[:, 0]
-            sampled_y = sampled_states_np[:, 1]
-            sampled_t = np.arange(0, len(sampled_x))
+
             # ax.scatter(sampled_x, sampled_y, c=sampled_t, cmap = "plasma", marker='+', s=100)
         ax.scatter(dt_sampler.latest_desired_goal[0], dt_sampler.latest_desired_goal[1], color='red', marker='x', s=100, label='Latest Desired Goal')
+        for res_goal in self.dt_sampler.residual_goals_debug:
+            ax.scatter(res_goal[0], res_goal[1], color='orange', marker='*', s=100, label='Residual Goal')
         circle = plt.Circle((dt_sampler.latest_desired_goal[0], dt_sampler.latest_desired_goal[1]), 0.5, fill=False, edgecolor='black')
         ax.add_patch(circle)
         cbar = ax.figure.colorbar(scatter, ax=ax, label='Time step')
@@ -206,12 +212,6 @@ class Visualizer:
         scatter = ax.scatter(x, y, c=rtgs, cmap='viridis', edgecolor='k')
         ax.scatter(dt_sampler.latest_desired_goal[0], dt_sampler.latest_desired_goal[1], color='red', marker='x', s=100, label='Latest Desired Goal')
 
-        # if len(dt_sampler.residual_goals_debug):
-        #     residual_goals_np = np.array(dt_sampler.residual_goals_debug)
-        #     res_x = residual_goals_np[:, 0]
-        #     res_y = residual_goals_np[:, 1]
-        #     res_t = np.arange(0, len(res_x))
-            # ax.scatter(res_x, res_y, c=res_t, cmap = "cool", marker='x', s=300, label='Latest Desired Goal')
         cbar = ax.figure.colorbar(scatter, ax=ax, label='RTG')
 
         ax.set_xlabel('X Position')

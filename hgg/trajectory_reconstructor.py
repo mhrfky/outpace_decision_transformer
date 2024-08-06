@@ -20,7 +20,7 @@ class TrajectoryReconstructor:
             for j in range(i + 1, len(states)):
                 distance = np.linalg.norm(states[i] - states[j])
                 if distance <= max_distance:
-                    self.G.add_edge(i, j, weight=distance)
+                    self.G.add_edge(i, j, weight=distance ** 2)
 
     @time_decorator
     def add_trajectory(self, trajectory, max_distance):
@@ -32,7 +32,7 @@ class TrajectoryReconstructor:
                 if i != j:
                     distance = np.linalg.norm(self.states[i] - self.states[j])
                     if distance <= max_distance:
-                        self.G.add_edge(i, j, weight=distance)
+                        self.G.add_edge(i, j, weight=distance ** 2)
 
     @time_decorator
     def shortest_path_trajectory(self, rewards, start_index, end_index):
@@ -103,8 +103,11 @@ class TrajectoryReconstructor:
                 distance = np.linalg.norm(new_states[i] - new_states[j])
 
                 if i != j and distance <= max_distance:
-                    new_graph.add_edge(i, j, weight=distance )  # Use squared distance for consistency
+                    new_graph.add_edge(i, j, weight=distance ** 2)  # Use squared distance for consistency
+        
+        
 
         # Update the states and graph
         self.states = new_states
+        
         self.G = new_graph

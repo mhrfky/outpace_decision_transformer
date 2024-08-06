@@ -225,38 +225,14 @@ class DTSampler:
 			generated_states = generated_states_t.squeeze(0).detach().cpu().numpy()
 			goal = generated_states[-1]
 			self.residual_this_episode = True
-			self.residual_goals_debug = np.array([generated_states[:-n],generated_states[-n:]])
+			self.residual_goals_debug = np.vstack((self.residual_goals_debug, goal))
 			self.residuals_till_now = np.vstack((self.residuals_till_now, [goal]))
 			print(f"Residual goal generated in episode: {self.episode} in the step : {110 -n }")
 
 			return goal 
 
 
-	def generate_goal(self, achieved_goals, rtgs):
-		actions = torch.zeros((1, achieved_goals.shape[0], 2), device="cuda", dtype=torch.float32)
-		timesteps = torch.arange(achieved_goals.shape[0], device="cuda").unsqueeze(0)  # Adding batch dimension
-		achieved_goals = torch.tensor(achieved_goals, device="cuda", dtype=torch.float32)
 
-		rtgs = torch.tensor(rtgs, device = "cuda", dtype = torch.float32).unsqueeze(0)
-		while True:
-			desired_goal = self.dt.get_state(achieved_goals, actions, None, rtgs, timesteps)[0] # TODO set this right this is just patchwork
-			loss = 0
-			if (desired_goal[0] < self.limits[0][0]):
-				loss += (self.limits[0][0] - desired_goal[0])**2
-			if (desired_goal[0] > self.limits[0][1]):
-				loss += (desired_goal[0] - self.limits[0][1])**2
-			if (desired_goal[1] < self.limits[1][0]):
-				loss += (self.limits[1][0] - desired_goal[1])**2
-			if (desired_goal[1] > self.limits[1][1]):
-				loss += (desired_goal[1] - self.limits[1][1])**2
-			if loss > 0:
-				self.state_optimizer.zero_grad()
-				loss.backward(retain_graph=True)  # retain the computation graph
-				torch.nn.utils.clip_grad_norm_(self.dt.parameters(), 0.25)
-				self.state_optimizer.step()
-			else:
-				self.positives_buffer.insert_state(desired_goal.detach().cpu().numpy())
-				return desired_goal.detach()  # return the desired goal if within limits
 	@time_decorator
 	def visualize_value_heatmaps_for_debug(self, goals_predicted_during_training, proclaimed_states, proclaimed_rtgs):
 		self.visualizer.visualize_value_heatmaps_for_debug(goals_predicted_during_training, proclaimed_states, proclaimed_rtgs)
