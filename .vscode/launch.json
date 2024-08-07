@@ -7,7 +7,7 @@
 
 
         {
-            "name": "Python: Custom",
+            "name": "Umaze",
             "type": "python",
             "request": "launch",
             "program": "${workspaceFolder}/outpace_train.py",
@@ -17,14 +17,41 @@
             // "justMyCode": true
         },
         {
-            "name": "Python: Debug Custom",
+            "name": "NMaze",
             "type": "python",
             "request": "launch",
             "program": "${workspaceFolder}/outpace_train.py",
             "console": "integratedTerminal",
-            "args": ["env=PointUMaze-v0","aim_disc_replay_buffer_capacity=10000","save_buffer=true","adam_eps=0.01"],
+            "args": ["env=PointNMaze-v0","aim_disc_replay_buffer_capacity=10000","save_buffer=true","adam_eps=0.01"],
             // "env": {"CUDA_VISIBLE_DEVICES" : "0"},
             // "justMyCode": true
+        }
+        ,
+        {
+            "name": "playground",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/playground.py",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+        ,
+        {
+            "name": "playground2",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/playground2.py",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+        ,
+        {
+            "name": "playground3",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/playground3.py",
+            "console": "integratedTerminal",
+            "justMyCode": true
         }
     ]
 }

@@ -6,6 +6,7 @@ from scipy.interpolate import griddata
 import itertools
 from hgg.value_estimator import ValueEstimator
 from playground2 import time_decorator
+import torch
 class Visualizer:
     def __init__(self, dt_sampler):
         self.dt_sampler = dt_sampler
@@ -53,9 +54,6 @@ class Visualizer:
         pos = (i // fig_shape[1], i % fig_shape[1])
         self.visualize_trajectories_on_rtgs(axs[pos[0]][pos[1]])
 
-        i += 1
-        pos = (i // fig_shape[1], i % fig_shape[1])
-        self.visualize_max_rewards(axs[pos[0]][pos[1]])
 
         i += 1
         pos = (i // fig_shape[1], i % fig_shape[1])
@@ -91,14 +89,62 @@ class Visualizer:
         # ax.set_xlabel('Trajectory Length')
         # ax.set_ylabel('Frequency')
         # ax.set_title('Histogram of Trajectory Lengths')
+        # q_uncertainties = []
+        # q1s = []
+        # q2s = []
+        # for state in dt_sampler.trajectory_reconstructor.states:
+        #     q1, q2  = value_estimator.get_q_values(torch.tensor(state, device="cuda", dtype=torch.float32))
+        #     q1 = q1.cpu().detach().numpy()
+        #     q2 = q2.cpu().detach().numpy()
+        #     q_uncertainty = np.abs(q1 - q2)
+        #     q_uncertainties.append(q_uncertainty)
+        #     q1s.append(q1)
+        #     q2s.append(q2)
+        # q_uncertainties = np.array(q_uncertainties).squeeze(-1).squeeze(-1)
+        # q1s = np.array(q1s).squeeze(-1).squeeze(-1)
+        # q2s = np.array(q2s).squeeze(-1).squeeze(-1)
+        
+        i += 1
+        pos = (i // fig_shape[1], i % fig_shape[1])
+        ax = axs[pos[0]][pos[1]]
+        entropy_list =[]
+        for elem in combined_heatmap:
+            entropy_list.append(dt_sampler.entropy_gain(elem))
+        entropy_list = np.array(entropy_list)
+        scatter = ax.scatter(combined_heatmap[:, 0], combined_heatmap[:, 1], c=entropy_list, cmap='viridis', edgecolor='k')
+        ax.set_title('Entropy Gain')
+        cbar = ax.figure.colorbar(scatter, ax=ax, label='Entropy Gain')
+        ax.set_xlim(-2, 10)
+        ax.set_ylim(-2, 10)
+        ax.set_aspect('equal')  # Ensuring equal aspect ratio
+        ax.grid(True)
+        
+        
 
         i += 1
         pos = (i // fig_shape[1], i % fig_shape[1])
+        ax = axs[pos[0]][pos[1]]
+        # scatter = ax.scatter(dt_sampler.trajectory_reconstructor.states[:,0], dt_sampler.trajectory_reconstructor.states[:,1], c=q2s, cmap='viridis', edgecolor='k')
+        # cbar = ax.figure.colorbar(scatter, ax=ax, label='Time step')
+        # ax.set_title('Q 2')
+        # ax.set_xlim(-2, 10)
+        # ax.set_ylim(-2, 10)
+        # ax.set_aspect('equal')  # Ensuring equal aspect ratio
+        # ax.grid(True)
+        
+
         # self.plot_residuals_if_exists(axs[pos[0]][pos[1]])
 
         i += 1
         pos = (i // fig_shape[1], i % fig_shape[1])
-        self.plot_residuals_till_now(axs[pos[0]][pos[1]])
+        ax = axs[pos[0]][pos[1]]
+        # scatter = ax.scatter(dt_sampler.trajectory_reconstructor.states[:,0], dt_sampler.trajectory_reconstructor.states[:,1], c=q_uncertainties, cmap='viridis', edgecolor='k')
+        # cbar = ax.figure.colorbar(scatter, ax=ax, label='Time step')
+        # ax.set_title('Q Uncertainty')
+        # ax.set_xlim(-2, 10)
+        # ax.set_ylim(-2, 10)
+        # ax.set_aspect('equal')  # Ensuring equal aspect ratio
+        # ax.grid(True)
 
         
 

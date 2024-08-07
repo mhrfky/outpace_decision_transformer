@@ -7,9 +7,9 @@ def plot_positions(positions):
     # Set x and y limits
     plt.xlim(-2, 10)
     plt.ylim(-2, 10)
-    
+    t = np.arange(len(positions))
     # Plot positions
-    plt.scatter(positions[:, 0], positions[:, 1])
+    plt.scatter(positions[:, 0], positions[:, 1], c = t , c_map = 'viridis')
     
     # Add labels and title
     plt.xlabel('X')
@@ -31,14 +31,18 @@ def plot_positions(positions):
     # Save the plot with the latest index
     plt.savefig(f'debug/debug{latest_index + 1}.png')
     plt.show()
+    plt.close()
 
-def plot_two_array_positions(positions):
+def plot_two_array_positions(positions, positions_2):
     # Set x and y limits
     plt.xlim(-2, 10)
     plt.ylim(-2, 10)
-    
+    t = np.arange(len(positions))
+    t2 = np.arange(len(positions_2))
     # Plot positions
-    plt.scatter(positions[:, 0], positions[:, 1])
+    plt.scatter(positions[:, 0], positions[:, 1], c = t , cmap = 'viridis')
+    plt.scatter(positions_2[:, 0], positions_2[:, 1], c = t2 , marker ="*", cmap = 'viridis')
+
     
     # Add labels and title
     plt.xlabel('X')
@@ -60,3 +64,4 @@ def plot_two_array_positions(positions):
     # Save the plot with the latest index
     plt.savefig(f'debug/debug{latest_index + 1}.png')
     plt.show()
+    plt.close()

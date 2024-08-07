@@ -16,7 +16,8 @@ from video import VideoRecorder
 from hgg.trajectory_reconstructor import TrajectoryReconstructor
 from hgg.utils import calculate_max_distance
 from playground2 import time_decorator
-
+from scipy.interpolate import splprep, splev
+from debug_utils import plot_positions, plot_two_array_positions
 debug_loc_list = []
 debug_rtg_list = []
 class DTSampler:    
@@ -125,11 +126,43 @@ class DTSampler:
 		self.debug_traj_lens = []
 
 		# self.sampled_goals = np.array([]).reshape(0,2)
+	def cubic_spline_interpolation_loss(self, trajectory_t , residuals_t):
+		trajectory_np = trajectory_t.squeeze(0).detach().cpu().numpy()
+		residuals_t = residuals_t.squeeze(0)
+		x = trajectory_np[:,0]
+		y = trajectory_np[:,1]
+		if len(x) < 3:
+			return torch.tensor(0, device = 'cuda', dtype=torch.float32)
+		tck,u = splprep([x,y],s=1, k=2)
+
+		u_extrapolated = np.linspace(0, 1.5, num=len(x) + len(residuals_t))  # Extend beyond the original data range
+		x_extrapolated, y_extrapolated = splev(u_extrapolated, tck)
+		spline_t = torch.tensor(np.vstack((x_extrapolated, y_extrapolated)).T, device = 'cuda' ,dtype=torch.float32)
+		# plot_two_array_positions(trajectory_np,np.vstack((x_extrapolated, y_extrapolated)).T )
+		_, dtw_distance, _, _ = trajectory_similarity_loss(spline_t[-5:], residuals_t)
+		return dtw_distance
+		
+	def entropy_gain(self, new_goal, bandwidth=0.1):
+		current_goals = self.trajectory_reconstructor.states
+		current_goals_tensor = torch.tensor(current_goals, dtype=torch.float32)
+		new_goal_tensor = torch.tensor(new_goal, dtype=torch.float32).unsqueeze(0)
+		current_entropy = self.calculate_entropy(current_goals_tensor, bandwidth)
+		updated_goals = torch.cat([current_goals_tensor, new_goal_tensor], dim=0)
+		updated_entropy = self.calculate_entropy(updated_goals, bandwidth)
+		return updated_entropy - current_entropy		
+	def calculate_entropy(self,goals, bandwidth=0.1):
+		goals_tensor = torch.tensor(goals, dtype=torch.float32)
+		kde = torch.distributions.MultivariateNormal(loc=goals_tensor, covariance_matrix=bandwidth * torch.eye(goals_tensor.size(1)))
+		log_density = kde.log_prob(goals_tensor)
+		density = torch.exp(log_density)
+		entropy = -torch.sum(density * log_density)
+		return entropy
 
 	@time_decorator
 	def train(self, achieved_states, rtgs):
 		goals_predicted_debug_np = np.array([[0,0]])
 		max_distance = calculate_max_distance(achieved_states)	
+		self.residual_goal_length = 5
 		for trajectory, rtgs_t, traj_len in self.trajectory_reconstructor.get_shortest_path_trajectories_with_yield(achieved_states, rtgs, top_n=50, eval_fn = self.value_estimator.get_state_values, n= 10, max_distance=max_distance):
 			self.debug_trajectories.append(trajectory[-traj_len:])
 			self.debug_traj_lens.append(traj_len)
@@ -146,21 +179,25 @@ class DTSampler:
 			input_rtgs_t = input_rtgs_t - rtgs_t[0, -1]
 			input_rtgs_t = input_rtgs_t.unsqueeze(-1)
 
-			generated_states, generated_actions, generated_rtgs, generated_timesteps = self.generate_next_n_states(
-				input_achieved_t,input_actions_t,input_rtgs_t,input_timesteps_t, n=traj_len)
+			generated_states_t, generated_actions, generated_rtgs_t, generated_timesteps = self.generate_next_n_states(
+				input_achieved_t,input_actions_t,input_rtgs_t,input_timesteps_t, n=traj_len + self.residual_goal_length) 
+			generated_states_t, residual_states_t = np.split(generated_states_t,[-self.residual_goal_length], axis= 1)
+			generated_rtgs_t = generated_rtgs_t[:,:-self.residual_goal_length]
+			entropy_gains_t = torch.tensor([self.entropy_gain(goal) for goal in residual_states_t.squeeze(0).detach().cpu().numpy()]).sum()
+			goals_predicted_debug_np = np.vstack((goals_predicted_debug_np, generated_states_t.squeeze(0)[-traj_len:].detach().cpu().numpy()))
 
-			goals_predicted_debug_np = np.vstack((goals_predicted_debug_np, generated_states.squeeze(0)[-traj_len:].detach().cpu().numpy()))
-
-			state_values_t, achieved_values_t, exploration_values_t, q_values_t = self.value_estimator.get_state_values_t(generated_states[:,-traj_len-1:,:])
+			state_values_t, achieved_values_t, exploration_values_t, q_values_t = self.value_estimator.get_state_values_t(generated_states_t[:,-traj_len-1:,:])
 			rtg_values_t = self.reward_to_rtg(state_values_t)
 
 			goal_val_loss = torch.nn.L1Loss()(rtg_values_t[:,1:], rtgs_t[:,-traj_len:])
-			rtg_pred_loss = torch.nn.L1Loss()(generated_rtgs[:,-traj_len:].squeeze(-1), rtg_values_t[:,1:])
-			similarity_loss, dtw_distance, euclidean_distance, smoothness_reg =  trajectory_similarity_loss(generated_states[:,-traj_len:,:].squeeze(0), trajectory_t[0,-traj_len:,:])
+			rtg_pred_loss = torch.nn.L1Loss()(generated_rtgs_t[:,-traj_len:].squeeze(-1), rtg_values_t[:,1:])
+			similarity_loss, dtw_distance, euclidean_distance, smoothness_reg =  trajectory_similarity_loss(generated_states_t[:,-traj_len:,:].squeeze(0), trajectory_t[0,-traj_len:,:])
+
+			# residual_goals_similarity_loss = self.cubic_spline_interpolation_loss(generated_states_t[:,-traj_len:,:], residual_states_t)
 			q_gain_rewards_t = torch.diff(q_values_t)
 			state_val_gain_rewards_t =  torch.diff(state_values_t)
 			# 1 + 0.4 + 1 + 1 + 2
-			total_loss = dtw_distance + smoothness_reg * 0.3 + rtg_pred_loss + goal_val_loss -  2* torch.mean(state_val_gain_rewards_t)#dtw_distance +  0.4 * smoothness_reg  +  rtg_pred_loss +   goal_val_loss - q_values_t.mean()
+			total_loss = -entropy_gains_t  + dtw_distance + smoothness_reg * 0.3 + rtg_pred_loss + goal_val_loss -  2* torch.mean(state_val_gain_rewards_t)#dtw_distance +  0.4 * smoothness_reg  +  rtg_pred_loss +   goal_val_loss - q_values_t.mean()
 			self.state_optimizer.zero_grad()
 			total_loss.backward(retain_graph=True)
 			torch.nn.utils.clip_grad_norm_(self.dt.parameters(), 0.25)
