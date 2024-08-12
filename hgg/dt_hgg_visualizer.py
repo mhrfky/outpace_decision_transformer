@@ -9,7 +9,7 @@ from playground2 import time_decorator
 import torch
 class Visualizer:
     def __init__(self, dt_sampler):
-        self.dt_sampler = dt_sampler
+        self.dt_sampler  = dt_sampler
         self.value_estimator : ValueEstimator  = dt_sampler.value_estimator
         self.limits = self.dt_sampler.limits
         self.history_of_number_of_states_in_reconstructor = np.array([]).reshape(0, 1)
@@ -80,8 +80,8 @@ class Visualizer:
         ax.scatter(predicted_states[20:, 0], predicted_states[20:, 1], c=np.arange(len(predicted_states[20:,:])), cmap='viridis', edgecolor='k')
 
         ax.set_title('Proclaimed Trajectory')
-        ax.set_xlim(-2, 10)
-        ax.set_ylim(-2, 10)
+        ax.set_xlim(self.limits[0][0], self.limits[0][1])
+        ax.set_ylim(self.limits[1][0], self.limits[1][1])
         ax.set_aspect('equal')  # Ensuring equal aspect ratio
         ax.grid(True)
         # traj_lens = self.dt_sampler.debug_traj_lens
@@ -107,18 +107,18 @@ class Visualizer:
         i += 1
         pos = (i // fig_shape[1], i % fig_shape[1])
         ax = axs[pos[0]][pos[1]]
-        entropy_list =[]
-        for elem in combined_heatmap:
-            entropy_list.append(dt_sampler.entropy_gain(elem))
-        entropy_list = np.array(entropy_list)
-        scatter = ax.scatter(combined_heatmap[:, 0], combined_heatmap[:, 1], c=entropy_list, cmap='viridis', edgecolor='k')
-        ax.set_title('Entropy Gain')
-        cbar = ax.figure.colorbar(scatter, ax=ax, label='Entropy Gain')
-        ax.set_xlim(-2, 10)
-        ax.set_ylim(-2, 10)
-        ax.set_aspect('equal')  # Ensuring equal aspect ratio
-        ax.grid(True)
-        
+        # entropy_list =[]
+        # for elem in combined_heatmap:
+        #     entropy_list.append(dt_sampler.entropy_gain(elem))
+        # entropy_list = np.array(entropy_list)
+        # scatter = ax.scatter(combined_heatmap[:, 0], combined_heatmap[:, 1], c=entropy_list, cmap='viridis', edgecolor='k')
+        # ax.set_title('Entropy Gain')
+        # cbar = ax.figure.colorbar(scatter, ax=ax, label='Entropy Gain')
+        # ax.set_xlim(-2, 10)
+        # ax.set_ylim(-2, 10)
+        # ax.set_aspect('equal')  # Ensuring equal aspect ratio
+        # ax.grid(True)
+
         
 
         i += 1
@@ -162,8 +162,8 @@ class Visualizer:
         ax.set_title(title)
         ax.set_xlabel('X coordinate')
         ax.set_ylabel('Y coordinate')
-        ax.set_xlim(-2, 10)
-        ax.set_ylim(-2, 10)
+        ax.set_xlim(self.limits[0][0], self.limits[0][1])
+        ax.set_ylim(self.limits[1][0], self.limits[1][1])
         ax.set_aspect('equal')  # Ensuring equal aspect ratio
         ax.grid(True)
     def visualize_sampled_trajectories(self,ax):
@@ -181,16 +181,16 @@ class Visualizer:
             ax.scatter(traj[-1,0], traj[-1,1], color = 'red', edgecolor = 'k')
         ax.set_aspect('equal')  # Ensuring equal aspect ratio
         ax.grid(True)
-        ax.set_xlim(-2, 10)
-        ax.set_ylim(-2, 10)
+        ax.set_xlim(self.limits[0][0], self.limits[0][1])
+        ax.set_ylim(self.limits[1][0], self.limits[1][1])
         ax.set_title('Sampled Trajectories')
     def visualize_sampled_goals(self, ax):
         dt_sampler = self.dt_sampler
         sampled_goals = dt_sampler.sampled_goals
         t = np.arange(0, len(sampled_goals))
         scatter = ax.scatter(sampled_goals[:, 0], sampled_goals[:, 1], c=t, cmap='viridis', edgecolor='k')
-        ax.set_xlim(-2, 10)
-        ax.set_ylim(-2, 10)
+        ax.set_xlim(self.limits[0][0], self.limits[0][1])
+        ax.set_ylim(self.limits[1][0], self.limits[1][1])
         cbar = ax.figure.colorbar(scatter, ax=ax, label='Time step')
         ax.set_aspect('equal')  # Ensuring equal aspect ratio
         ax.grid(True)
@@ -208,8 +208,8 @@ class Visualizer:
         ax.set_title("sampling points")
         ax.set_xlabel('X coordinate')
         ax.set_ylabel('Y coordinate')
-        ax.set_xlim(-2, 10)
-        ax.set_ylim(-2, 10)
+        ax.set_xlim(self.limits[0][0], self.limits[0][1])
+        ax.set_ylim(self.limits[1][0], self.limits[1][1])
         ax.set_aspect('equal')  # Ensuring equal aspect ratio
         ax.grid(True)
 
@@ -244,8 +244,8 @@ class Visualizer:
         ax.set_xlabel('X Position')
         ax.set_ylabel('Y Position')
         ax.set_title(title)
-        ax.set_xlim(-2, 10)
-        ax.set_ylim(-2, 10)
+        ax.set_xlim(self.limits[0][0], self.limits[0][1])
+        ax.set_ylim(self.limits[1][0], self.limits[1][1])
         ax.set_aspect('equal')  # Ensuring equal aspect ratio
         ax.grid(True)
 
@@ -263,8 +263,8 @@ class Visualizer:
         ax.set_xlabel('X Position')
         ax.set_ylabel('Y Position')
         ax.set_title(title)
-        ax.set_xlim(-2, 10)
-        ax.set_ylim(-2, 10)
+        ax.set_xlim(self.limits[0][0], self.limits[0][1])
+        ax.set_ylim(self.limits[1][0], self.limits[1][1])
         ax.set_aspect('equal')  # Ensuring equal aspect ratio
         ax.grid(True)
     def plot_residuals_if_exists(self, ax):
@@ -276,8 +276,8 @@ class Visualizer:
             ax.scatter(residual_goals_np[:, 0], residual_goals_np[:, 1], c = np.arange(len(residual_goals_np)), s = 5, cmap='viridis', label='Residual Goals')
             ax.scatter(residual_goals_np[-1, 0], residual_goals_np[-1, 1], color='red', marker = 'x', s=100, label='Final Residual Goal')
             ax.set_title('Residual Trajectory')
-            ax.set_xlim(-2, 10)
-            ax.set_ylim(-2, 10)
+            ax.set_xlim(self.limits[0][0], self.limits[0][1])
+            ax.set_ylim(self.limits[1][0], self.limits[1][1])
             ax.set_aspect('equal')  # Ensuring equal aspect ratio
             ax.grid(True)
     def plot_residuals_till_now(self,ax):
@@ -285,8 +285,8 @@ class Visualizer:
         y = self.dt_sampler.residuals_till_now[:,1]
         ax.scatter(x, y, c = np.arange(len(x)), cmap='viridis', label='Residual Goals', edgecolor='k')
         ax.set_title('Residual Goals Till Now')
-        ax.set_xlim(-2, 10)
-        ax.set_ylim(-2, 10)
+        ax.set_xlim(self.limits[0][0], self.limits[0][1])
+        ax.set_ylim(self.limits[1][0], self.limits[1][1])
         ax.set_aspect('equal')  # Ensuring equal aspect ratio
         ax.grid(True)
 
@@ -294,8 +294,8 @@ class Visualizer:
         data_points = [
             [x, y]
             for x, y in itertools.product(
-                range(self.limits[0][0], self.limits[0][1] + 1),
-                range(self.limits[1][0], self.limits[1][1] + 1),
+                range(self.limits[0][0], self.limits[0][1]),
+                range(self.limits[1][0], self.limits[1][1]),
             )
         ]
         return np.array(data_points, dtype=np.float32)

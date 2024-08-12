@@ -145,6 +145,8 @@ class ValueEstimator:
             q_values_t = self.rescale_values(q_values_t, q_min, q_max)
             # achieved_values_t = self.rescale_values(achieved_values_t, aim_min, aim_max)
             exploration_values_t = (exploration_values_t - expl_min) / (expl_max - expl_min)
+            state_values_t = self.gamma * achieved_values_t + self.beta * q_values_t + self.sigma * exploration_values_t
+            state_values_t = state_values_t.unsqueeze(0)
 
         return state_values_t, achieved_values_t, exploration_values_t, q_values_t
     def rescale_values(self, values, min_val, max_val):

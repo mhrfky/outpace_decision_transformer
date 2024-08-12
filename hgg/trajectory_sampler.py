@@ -29,6 +29,7 @@ def find_decreasing_rtgs(rtgs, segment_length=10, dynamic_threshold=False, windo
 
     return decreasing_segments
 
+
 def fit_linear_segment(segment):
     n = segment.shape[0]
     x = torch.ones((n, 2))

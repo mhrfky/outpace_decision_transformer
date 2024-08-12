@@ -4,14 +4,19 @@ from sklearn.cluster import KMeans
 from networkx import NetworkXNoPath, astar_path
 from hgg.utils import calculate_max_distance
 from playground2 import time_decorator
+
 class TrajectoryReconstructor:
 
-    def __init__(self, buffer_size=200, n_clusters=200, merge_sample_size=5):
+    def __init__(self, buffer_size=200, n_clusters=200, merge_sample_size=5, merge_when_full=True):
         self.G = nx.Graph()
         self.states = np.array([]).reshape(0, 2)  # Initialize an empty array for states
         self.buffer_size = buffer_size
         self.n_clusters = n_clusters
         self.merge_sample_size = merge_sample_size
+        if merge_when_full:
+            self.cleaning_func = self.merge_states_using_kmeans
+        else:
+            self.cleaning_func = self.remove_oldest_states
 
     def create_graph(self, states, max_distance):
         self.states = states
@@ -50,21 +55,23 @@ class TrajectoryReconstructor:
         except NetworkXNoPath:
             print(f"No path found from {start_index} to {end_index}.")
             return None, None
+
     def concat_original_with_new(self, new_trajectory, len_traj, i, rewards, new_rewards):
         if new_trajectory is None:
             return None, None
         if len_traj == 0:
             return self.states[-100:i], rewards[-100:i]
         return np.vstack((self.states[-100:i], new_trajectory)), np.hstack((rewards[-100:i], new_rewards))
+
     def get_shortest_path_trajectories_with_yield(self, states, rtgs, top_n, eval_fn=None, n=10, max_distance=None):
         if max_distance is None:
             max_distance = calculate_max_distance(states)
 
         self.add_trajectory(states, max_distance)
         rewards = eval_fn(self.states, None)[0]
-        top_indices = np.argsort(rewards)[-n:]
+        top_indices = np.argsort(rewards)[-top_n:]
         random_indices = np.random.choice(top_indices, size=n, replace=False)
-        # top_indices = random_indices
+        top_indices = random_indices
         for idx in top_indices:
             for i in range(self.states.shape[0]-100 + 20, self.states.shape[0], 10):
                 start_index = i
@@ -82,7 +89,8 @@ class TrajectoryReconstructor:
                 yield new_trajectory, new_rtgs, len_traj
             
         if len(self.states) >= self.buffer_size:
-            self.merge_states_using_kmeans(max_distance)
+            self.cleaning_func(max_distance)
+
     @time_decorator
     def merge_states_using_kmeans(self, max_distance):
         """Merge densely clustered states using K-means and keep isolated points to maintain expansiveness."""
@@ -105,9 +113,39 @@ class TrajectoryReconstructor:
                 if i != j and distance <= max_distance:
                     new_graph.add_edge(i, j, weight=distance)  # Use squared distance for consistency
         
-        
-
         # Update the states and graph
         self.states = new_states
-        
         self.G = new_graph
+
+    @time_decorator
+    def remove_oldest_states(self, max_distance):
+        """Remove the oldest 100 states and update the graph accordingly."""
+        if len(self.states) <= 100:
+            return  # Do nothing if there are 100 or fewer states
+
+        # Determine the nodes to remove (the oldest 100)
+        nodes_to_remove = list(range(100))
+
+        # Remove the nodes from the graph
+        self.G.remove_nodes_from(nodes_to_remove)
+
+        # Update the states array by removing the oldest 100 states
+        self.states = self.states[100:]
+
+        # Create a new graph to avoid inconsistencies
+        new_graph = nx.Graph()
+
+        # Re-index remaining nodes
+        for i, state in enumerate(self.states):
+            new_graph.add_node(i, pos=state)
+
+        # Add edges based on max_distance
+        for i in range(len(self.states)):
+            for j in range(i + 1, len(self.states)):
+                distance = np.linalg.norm(self.states[i] - self.states[j])
+                if distance <= max_distance:
+                    new_graph.add_edge(i, j, weight=distance)
+
+        # Replace the old graph with the new graph
+        self.G = new_graph
+

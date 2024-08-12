@@ -40,7 +40,8 @@ class DecisionTransformer(TrajectoryModel):
             *([nn.Linear(hidden_size, self.act_dim)] + ([nn.Tanh()] if action_tanh else []))
         )
         self.predict_return = torch.nn.Linear(hidden_size, 1)
-
+    def get_state_embeddings(self,states):
+        return self.embed_state(states)
     def forward(self, states, actions, rewards, returns_to_go, timesteps, attention_mask=None):
 
         batch_size, seq_length = states.shape[0], states.shape[1]

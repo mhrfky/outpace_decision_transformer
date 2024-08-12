@@ -248,8 +248,8 @@ class Workspace(object):
         )
         dt = dt.to(device=self.device)
 
-
-        self.dt_sampler = DTSampler(self.env, self.eval_env, agent = self.get_agent(), state_optimizer= optimizer, dt= dt, video_recorder=self.train_video_recorder)
+        env_name = get_original_final_goal(self.cfg.env)
+        self.dt_sampler = DTSampler(self.env, self.eval_env, agent = self.get_agent(), optimizer= optimizer, dt= dt, video_recorder=self.train_video_recorder, env_name=self.cfg.env)
 
     def init_env(self,cfg):
         cfg.max_episode_timesteps = max_episode_timesteps_dict[cfg.env]
