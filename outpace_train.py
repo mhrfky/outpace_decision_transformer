@@ -702,15 +702,15 @@ class Workspace(object):
                 if self.env.is_residual_goal:
                     if info.get('is_current_goal_success'):
                         if (self.cfg.use_uncertainty_for_randomwalk not in [None, 'none', 'None']) and self.step > self.get_agent().meta_test_sample_size:
-                            # residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
-                            qs = np.array(qs, dtype = float)
-                            residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
+                            residual_goal = self.get_residual_goal_with_aim(episode, obs)
+                            # qs = np.array(qs, dtype = float)
+                            # residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
                             # residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
 
                         else:
-                            # residual_goal = self.get_residual_goal_with_NML(obs)
-                            qs = np.array(qs, dtype = float)
-                            residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
+                            residual_goal = self.get_residual_goal_with_random(obs)
+                            # qs = np.array(qs, dtype = float)
+                            # residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
                             # residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
                         self.env.reset_goal(residual_goal)
                         obs[-self.env.goal_dim:] = residual_goal.copy()
@@ -718,16 +718,17 @@ class Workspace(object):
                     if info.get('is_current_goal_success'): #succeed original goal
                         self.env.original_goal_success = True
                         if (self.cfg.use_uncertainty_for_randomwalk not in [None, 'none', 'None']) and self.step > self.get_agent().meta_test_sample_size:
-                            qs = np.array(qs, dtype = float)
-                            residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
+                            # qs = np.array(qs, dtype = float)
+                            # residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
+                            residual_goal = self.get_residual_goal_with_random(obs)
 
-                            # residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
+                            # residual_goal = self.get_residual_goal_with_aim(episode, obs)
                         else:
-                            qs = np.array(qs, dtype = float)
-                            residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
+                            # qs = np.array(qs, dtype = float)
+                            # residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
+                            residual_goal = self.get_residual_goal_with_random(obs)
 
-                            # residual_goal = self.get_residual_goal_with_NML(obs)
-                            # residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
+
 
                         self.env.reset_goal(residual_goal)
                         obs[-self.env.goal_dim:] = residual_goal.copy()
@@ -747,7 +748,7 @@ class Workspace(object):
             replay_buffer.add(obs, action, reward, next_obs, done, last_timestep)
             self.aim_expl_buffer.add(obs, action, reward, next_obs, done, last_timestep)
 
-    def get_residual_goal_with_NML(self, obs):
+    def get_residual_goal_with_random(self, obs):
         noise = np.random.uniform(low=-self.cfg.randomwalk_random_noise, high=self.cfg.randomwalk_random_noise, size=self.env.goal_dim)
                             
         if self.cfg.env in [   'sawyer_peg_pick_and_place']:
@@ -759,7 +760,7 @@ class Workspace(object):
         residual_goal = self.env.convert_obs_to_dict(obs)['achieved_goal'] + noise
         return residual_goal
 
-    def get_residual_goal_with_nonNML(self, episode, obs):
+    def get_residual_goal_with_aim(self, episode, obs):
         return self.get_agent().sample_randomwalk_goals(obs = obs, ag = self.env.convert_obs_to_dict(obs)['achieved_goal'], \
                                 episode = episode, env=self.env, replay_buffer = self.get_inv_weight_curriculum_buffer(), \
                                 num_candidate = self.cfg.randomwalk_num_candidate, random_noise = self.cfg.randomwalk_random_noise, \

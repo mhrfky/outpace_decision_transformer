@@ -167,7 +167,7 @@ class DTSampler:
 		goals_predicted_debug_np = np.array([[0,0]])
 		max_distance = calculate_max_distance(achieved_states)	
 		self.residual_goal_length = 5
-		for trajectory, rtgs_t, traj_len in self.trajectory_reconstructor.get_shortest_path_trajectories_with_yield(achieved_states, rtgs, top_n=75, eval_fn = self.value_estimator.get_state_values, n= 10, max_distance=max_distance):
+		for trajectory, rtgs_t, traj_len in self.trajectory_reconstructor.get_shortest_jump_tree(achieved_states, top_n=30, eval_fn = self.value_estimator.get_state_values, pick_n= 10):
 
 			trajectory_t 								= torch.tensor(trajectory, device="cuda", dtype=torch.float32).unsqueeze(0)
 			rtgs_t 										= torch.tensor(rtgs_t, device="cuda", dtype=torch.float32).unsqueeze(0)
@@ -178,11 +178,10 @@ class DTSampler:
 			input_actions_t 							= actions_t[:, :-traj_len, :]
 			input_rtgs_t 								= rtgs_t[:, :-traj_len]
 			input_timesteps_t 							= timesteps_t[:, :-traj_len]
-			input_rtgs_t 								= input_rtgs_t - rtgs_t[0, -1]
 			input_rtgs_t								= input_rtgs_t.unsqueeze(-1)
 
 			generated_states_t, _, generated_rtgs_t, _  = self.generate_next_n_states(input_achieved_t,input_actions_t,input_rtgs_t,input_timesteps_t, n=traj_len + self.residual_goal_length) 
-			exploration_loss_t = self.estimate_novelty_through_embeddings(generated_states_t, traj_len + self.residual_goal_length)
+			exploration_loss_t = 0 #self.estimate_novelty_through_embeddings(generated_states_t, traj_len + self.residual_goal_length)
 			distances_t = torch.norm(generated_states_t[-(traj_len + self.residual_goal_length+1):, 1:] - generated_states_t[-(traj_len + self.residual_goal_length+1):, :-1], dim=-1)
 			distance_to_1 = distances_t
 			distance_regulation_loss = torch.mean(distance_to_1 ** 2)
@@ -195,12 +194,12 @@ class DTSampler:
 
 			goal_val_loss 								= self.goal_val_loss(rtg_values_t[:,1:], rtgs_t[:,-traj_len:])
 			rtg_pred_loss 								= self.rtg_pred_loss(generated_rtgs_t[:,-traj_len:].squeeze(-1), rtg_values_t[:,1:])
-			_, dtw_dist, euc_dist, smoothness_reg 		= trajectory_similarity_loss(generated_states_t[:,-traj_len:,:].squeeze(0), trajectory_t[0,-traj_len:,:])
+			_, dtw_dist, smoothness_reg 				= trajectory_similarity_loss(generated_states_t[:,-traj_len:,:].squeeze(0), trajectory_t[0,-traj_len:,:])
 
 			q_gain_rewards_t 							= torch.diff(q_val_t)
 			state_val_gain_rewards_t 					= torch.diff(total_val_t)
 
-			total_loss =  -exploration_loss_t + distance_regulation_loss + 0.4 * dtw_dist + smoothness_reg * 0.05 + rtg_pred_loss + goal_val_loss -  2* torch.mean(q_gain_rewards_t)
+			total_loss =  -exploration_loss_t  + 0.4 * dtw_dist + smoothness_reg * 0.05 + rtg_pred_loss + goal_val_loss -  2* torch.mean(q_gain_rewards_t)
 
 			self.state_optimizer.zero_grad()
 			total_loss.backward(retain_graph=True)

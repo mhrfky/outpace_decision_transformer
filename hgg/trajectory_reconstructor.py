@@ -50,8 +50,8 @@ class TrajectoryReconstructor:
 
             shortest_path_indices = astar_path(self.G, source=start_index, target=end_index, heuristic=heuristic, weight='weight')
             shortest_path_states = self.states[shortest_path_indices]
-            shortest_path_rtgs = rewards[shortest_path_indices]
-            return shortest_path_states, shortest_path_rtgs
+            shortest_path_rewards = rewards[shortest_path_indices]
+            return shortest_path_states, shortest_path_rewards
         except NetworkXNoPath:
             print(f"No path found from {start_index} to {end_index}.")
             return None, None
@@ -63,14 +63,16 @@ class TrajectoryReconstructor:
             return self.states[-100:i], rewards[-100:i]
         return np.vstack((self.states[-100:i], new_trajectory)), np.hstack((rewards[-100:i], new_rewards))
 
-    def get_shortest_path_trajectories_with_yield(self, states, rtgs, top_n, eval_fn=None, n=10, max_distance=None):
+    def get_shortest_path_trajectories_with_yield(self, states, rtgs, top_n, eval_fn=None, pick_n=10, max_distance=None):
         if max_distance is None:
             max_distance = calculate_max_distance(states)
 
         self.add_trajectory(states, max_distance)
+        if len(self.states) >= self.buffer_size:
+            self.cleaning_func(max_distance)
         rewards = eval_fn(self.states, None)[0]
         top_indices = np.argsort(rewards)[-top_n:]
-        random_indices = np.random.choice(top_indices, size=n, replace=False)
+        random_indices = np.random.choice(top_indices, size=pick_n, replace=False)
         top_indices = random_indices
         for idx in top_indices:
             for i in range(self.states.shape[0]-100 + 20, self.states.shape[0], 10):
@@ -88,8 +90,53 @@ class TrajectoryReconstructor:
                 new_trajectory, new_rtgs = self.concat_original_with_new(new_trajectory, len_traj , i, rewards, new_rewards)
                 yield new_trajectory, new_rtgs, len_traj
             
+
+    def get_shortest_jump_tree(self, states, top_n=50, pick_n=10, eval_fn=None):
+        max_distance = 1.5 # calculate_max_distance(states)
+        state = np.array([0, 0])
+        states = np.vstack((state, states))
+        self.add_trajectory(states, max_distance)
+
         if len(self.states) >= self.buffer_size:
             self.cleaning_func(max_distance)
+
+        g_rewards = eval_fn(self.states, None)[0] 
+        s_rewards = eval_fn(states, None)[0]
+        root = self.find_first_close_state([0,0])
+        shortest_path_lengths = nx.single_source_dijkstra_path_length(self.G, root)
+        shortest_paths = nx.single_source_dijkstra_path(self.G, root)
+
+        
+        
+        # Step 2: Sort the paths by the length (weight) in descending order
+        sorted_paths = sorted(shortest_paths.items(), key=lambda item: shortest_path_lengths[item[0]], reverse=True)
+        paths = np.array([path for _, path in sorted_paths])
+        nodes = np.array([node for node, _ in sorted_paths])
+
+        # Step 3: Select the top n paths
+        top_n_paths = nodes[:top_n]
+        # Select 'pick_n' unique random indices from the range of top_n_paths length
+        selected_indices = np.random.choice(len(top_n_paths), size=pick_n, replace=False)
+
+        # If top_n_paths is a list, use list comprehension to pick the paths
+        pick_n_paths = top_n_paths[selected_indices]
+        
+        
+        # Step 4: Yield the results
+        for  node in pick_n_paths:
+            for i in range(1,len(states), 20):
+                state = states[i]
+                state = self.find_first_close_state(state)
+                if state is None:
+                    i -= 15
+                    continue
+                path, temp_rewards = self.shortest_path_trajectory(g_rewards, start_index= state, end_index= node)
+
+                path_to_yield = np.concatenate((states[:i], path[:10]))
+                path_rtgs = np.concatenate((s_rewards[:i],temp_rewards[:10]))
+                path_rtgs -= path_rtgs[0]
+                path_rtgs = path_rtgs[::-1].copy()
+                yield path_to_yield, path_rtgs, min(10, len(path))
 
     @time_decorator
     def merge_states_using_kmeans(self, max_distance):
@@ -149,3 +196,9 @@ class TrajectoryReconstructor:
         # Replace the old graph with the new graph
         self.G = new_graph
 
+    def find_first_close_state(self, input_state):
+        for i,state in enumerate(self.states):
+            distance = np.linalg.norm(np.array(state) - np.array(input_state))
+            if distance <= 1:
+                return i
+        return None

@@ -49,16 +49,15 @@ def trajectory_similarity_loss(predicted_trajectory, actual_trajectory, alpha=0.
     # Compute the Soft-DTW loss
     dtw_distance = soft_dtw_loss(predicted_trajectory.unsqueeze(0), actual_trajectory.unsqueeze(0)).mean()
 
-    # Euclidean distance loss
-    euclidean_distance = torch.mean(torch.norm(predicted_trajectory - actual_trajectory, dim=1))
+
 
     # Smoothness regularization (L2 norm of differences between consecutive points)
     smoothness_reg = torch.sum(torch.norm(torch.diff(predicted_trajectory, dim=0), dim=1)**2)
 
     # Combine losses
-    total_loss = alpha * dtw_distance + beta * euclidean_distance + gamma * smoothness_reg
+    total_loss = alpha * dtw_distance  + gamma * smoothness_reg
 
-    return total_loss, dtw_distance, euclidean_distance, smoothness_reg
+    return total_loss, dtw_distance, smoothness_reg
 
 def entropy_gain(current_goals, new_goal, bandwidth=0.1):
     current_goals_tensor = torch.tensor(current_goals, dtype=torch.float32)
