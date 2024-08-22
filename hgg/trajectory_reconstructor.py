@@ -110,7 +110,7 @@ class TrajectoryReconstructor:
         
         # Step 2: Sort the paths by the length (weight) in descending order
         sorted_paths = sorted(shortest_paths.items(), key=lambda item: shortest_path_lengths[item[0]], reverse=True)
-        paths = np.array([path for _, path in sorted_paths])
+        paths = np.array([path for _, path in sorted_paths], dtype=object)
         nodes = np.array([node for node, _ in sorted_paths])
 
         # Step 3: Select the top n paths

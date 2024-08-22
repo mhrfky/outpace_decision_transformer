@@ -17,6 +17,9 @@ from hgg.utils import calculate_max_distance
 from playground2 import time_decorator
 from debug_utils import plot_positions, plot_two_array_positions
 from hgg.loss_utils import cubic_spline_interpolation_loss, trajectory_similarity_loss
+from sklearn.cluster import KMeans
+from hgg.utils import reorder_centroids_dtw
+
 debug_loc_list = []
 debug_rtg_list = []
 class DTSampler:    
@@ -74,6 +77,7 @@ class DTSampler:
 		self.residuals_till_now = np.array([]).reshape(0,2)
 		self.video_recorder : VideoRecorder = video_recorder
 		self.visualizer = Visualizer(self)	
+		self.debug_cluster = []
 	def reward_to_rtg(self,rewards):
 		return rewards - rewards[-1]
 
@@ -106,7 +110,7 @@ class DTSampler:
 
 
 		if self.episode % self.log_every_n_times == 0:
-			proclaimed_states, _ , proclaimed_rtgs, _ = self.generate_next_n_states(self.latest_achieved[:,:20], self.latest_acts[:,:20], np.expand_dims(self.latest_rtgs[:,:20],axis=-1), torch.arange(20, device="cuda").unsqueeze(0), n = 90)
+			proclaimed_states, _ , proclaimed_rtgs, _ = self.generate_next_n_states(self.latest_achieved[:,:1], self.latest_acts[:,:1], np.expand_dims(self.latest_rtgs[:,:1],axis=-1), torch.arange(1, device="cuda").unsqueeze(0), n = 90)
 			proclaimed_states = proclaimed_states.squeeze(0).detach().cpu().numpy() 
 			proclaimed_rtgs = proclaimed_rtgs.squeeze(0).detach().cpu().numpy()
 			self.visualize_value_heatmaps_for_debug(goals_predicted_debug_np, proclaimed_states, proclaimed_rtgs)
@@ -167,7 +171,7 @@ class DTSampler:
 		goals_predicted_debug_np = np.array([[0,0]])
 		max_distance = calculate_max_distance(achieved_states)	
 		self.residual_goal_length = 5
-		for trajectory, rtgs_t, traj_len in self.trajectory_reconstructor.get_shortest_jump_tree(achieved_states, top_n=30, eval_fn = self.value_estimator.get_state_values, pick_n= 10):
+		for trajectory, rtgs_t, traj_len in self.trajectory_reconstructor.get_shortest_jump_tree(achieved_states, top_n=25, eval_fn = self.value_estimator.get_state_values, pick_n= 10):
 
 			trajectory_t 								= torch.tensor(trajectory, device="cuda", dtype=torch.float32).unsqueeze(0)
 			rtgs_t 										= torch.tensor(rtgs_t, device="cuda", dtype=torch.float32).unsqueeze(0)
@@ -183,7 +187,7 @@ class DTSampler:
 			generated_states_t, _, generated_rtgs_t, _  = self.generate_next_n_states(input_achieved_t,input_actions_t,input_rtgs_t,input_timesteps_t, n=traj_len + self.residual_goal_length) 
 			exploration_loss_t = 0 #self.estimate_novelty_through_embeddings(generated_states_t, traj_len + self.residual_goal_length)
 			distances_t = torch.norm(generated_states_t[-(traj_len + self.residual_goal_length+1):, 1:] - generated_states_t[-(traj_len + self.residual_goal_length+1):, :-1], dim=-1)
-			distance_to_1 = distances_t
+			distance_to_1 = 1 - distances_t
 			distance_regulation_loss = torch.mean(distance_to_1 ** 2)
 
 			generated_states_t, residual_states_t 		= np.split(generated_states_t,[-self.residual_goal_length], axis= 1)
@@ -199,7 +203,7 @@ class DTSampler:
 			q_gain_rewards_t 							= torch.diff(q_val_t)
 			state_val_gain_rewards_t 					= torch.diff(total_val_t)
 
-			total_loss =  -exploration_loss_t  + 0.4 * dtw_dist + smoothness_reg * 0.05 + rtg_pred_loss + goal_val_loss -  2* torch.mean(q_gain_rewards_t)
+			total_loss =  distance_regulation_loss * 30 -exploration_loss_t  + 0.4 * dtw_dist + smoothness_reg * 0.05 + rtg_pred_loss + goal_val_loss -  2* torch.mean(q_gain_rewards_t)
 
 			self.state_optimizer.zero_grad()
 			total_loss.backward(retain_graph=True)
@@ -237,45 +241,74 @@ class DTSampler:
 			timesteps_t = torch.concat((timesteps_t, torch.tensor([timesteps_t[0][-1] + 1], device="cuda").unsqueeze(0)), dim = 1)
 
 		return achieved_states_t, actions_t, rtgs_t, timesteps_t
+	
+	def get_ordered_k_means_clusterings(self, states, k=4):
+		# Perform K-means clustering
+		kmeans = KMeans(n_clusters=k).fit(states)
+		labels = kmeans.labels_
+
+		# Initialize a list to store the indices of the last occurrence of each cluster
+		last_indices = []
+
+		# Find the last occurrence of each cluster label
+		for i in range(k):
+			indices = np.where(labels == i)[0]  # Find indices of points belonging to cluster i
+			if len(indices) > 0:
+				last_index = indices[-1]  # Get the last index for cluster i
+				last_indices.append(last_index)
+
+		# Sort the last indices and get the corresponding states
+		last_indices.sort()
+		ordered_states = np.array([states[i] for i in last_indices])
+
+		return ordered_states
+
 	@time_decorator
 	def sample(self, episode_observes = None, episode_acts = None, qs = None):
 		if episode_observes is None or qs is None or episode_acts is None:
 			if self.latest_achieved is None:
 				return np.array([0,8])
-			# goal_t =  self.generate_goal(self.latest_achieved,self.latest_rtgs + self.return_to_add)
-			actions_t = torch.tensor(self.latest_acts, device="cuda", dtype=torch.float32)
-			rtgs_t = torch.tensor(self.latest_rtgs, device="cuda", dtype=torch.float32).unsqueeze(2)
-			achieved_goals_states_t = torch.tensor(self.latest_achieved, device="cuda", dtype=torch.float32)
-			generated_states_t, _,_,_ = 	self.generate_next_n_states(achieved_goals_states_t, actions_t, rtgs_t, torch.arange(achieved_goals_states_t.shape[1], device="cuda").unsqueeze(0), n = 10)
+			actions_t = torch.tensor([[0,0]], device="cuda", dtype=torch.float32).unsqueeze(0)
+			rtgs_t = torch.tensor([[3]], device="cuda", dtype=torch.float32).unsqueeze(2)
+			achieved_goals_states_t = torch.tensor([[0,0]],device="cuda", dtype=torch.float32).unsqueeze(0)
+			
+			generated_states_t, _,_,_ = 	self.generate_next_n_states(self.latest_achieved[:,:1], self.latest_acts[:,:1], np.expand_dims(self.latest_rtgs[:,:1],axis=-1) + 0.1, torch.arange(1, device="cuda").unsqueeze(0), n = 100)
 
-			generated_states = generated_states_t.squeeze(0).detach().cpu().numpy()
-			goal = generated_states[-1]
+			generated_states = generated_states_t.squeeze(0).detach().cpu().numpy()	
+			generated_clusters = self.get_ordered_k_means_clusterings(generated_states, k=4)
 
+			self.debug_cluster = generated_clusters
+			goal = generated_clusters[1]
+			self.generated_clusters = generated_clusters[2:]
 			self.latest_desired_goal = goal
 			self.sampled_goals = np.concatenate((self.sampled_goals, [goal]))
 			self.sampled_states = np.concatenate((self.sampled_states, generated_states[-10:]))
 			return goal
 		else:
-			states = np.array([self.eval_env.convert_obs_to_dict(episode_observes[i])["achieved_goal"] for i in range(len(episode_observes))])
-			actions = np.array(episode_acts)
+			if len(self.generated_clusters) == 0 :
+				return None
+			goal = self.generated_clusters[0]
+			self.generated_clusters = self.generated_clusters[1:]
+			# states = np.array([self.eval_env.convert_obs_to_dict(episode_observes[i])["achieved_goal"] for i in range(len(episode_observes))])
+			# actions = np.array(episode_acts)
 
-			rewards, achieved_values, exploration_values, q_values = self.value_estimator.get_state_values(states, qs)
-			rtgs = self.reward_to_rtg(rewards)
+			# rewards, achieved_values, exploration_values, q_values = self.value_estimator.get_state_values(states, qs)
+			# rtgs = self.reward_to_rtg(rewards)
    
-			achieved_goals_states_t = torch.tensor([states], device="cuda", dtype=torch.float32)
-			rtgs_t = torch.tensor([rtgs], device="cuda", dtype=torch.float32).unsqueeze(2) + self.residual_goal_rtg_increase
-			actions_t = torch.tensor([actions], device="cuda", dtype=torch.float32)#.unsqueeze(0)
-			n = 110 - achieved_goals_states_t.shape[1]
-			generated_states_t, _,_,_ = self.generate_next_n_states(achieved_goals_states_t, actions_t, rtgs_t, torch.arange(achieved_goals_states_t.shape[1], device="cuda").unsqueeze(0), n = n)
-			generated_states = generated_states_t.squeeze(0).detach().cpu().numpy()
-			goal = generated_states[-1]
+			# achieved_goals_states_t = torch.tensor([states], device="cuda", dtype=torch.float32)
+			# rtgs_t = torch.tensor([rtgs], device="cuda", dtype=torch.float32).unsqueeze(2) + self.residual_goal_rtg_increase
+			# actions_t = torch.tensor([actions], device="cuda", dtype=torch.float32)#.unsqueeze(0)
+			# n = 110 - achieved_goals_states_t.shape[1]
+			# generated_states_t, _,_,_ = self.generate_next_n_states(achieved_goals_states_t, actions_t, rtgs_t, torch.arange(achieved_goals_states_t.shape[1], device="cuda").unsqueeze(0), n = n)
+			# generated_states = generated_states_t.squeeze(0).detach().cpu().numpy()
+			# goal = generated_states[-1]
 			self.residual_this_episode = True
 			self.residual_goals_debug = np.vstack((self.residual_goals_debug, goal))
 			self.residuals_till_now = np.vstack((self.residuals_till_now, [goal]))
-			print(f"Residual goal generated in episode: {self.episode} in the step : {110 -n }")
+			print(f"Residual goal generated in episode: {self.episode} in the step : {len(episode_observes) }")
 
 			return goal 
-
+	
 
 
 	@time_decorator

@@ -702,15 +702,20 @@ class Workspace(object):
                 if self.env.is_residual_goal:
                     if info.get('is_current_goal_success'):
                         if (self.cfg.use_uncertainty_for_randomwalk not in [None, 'none', 'None']) and self.step > self.get_agent().meta_test_sample_size:
-                            residual_goal = self.get_residual_goal_with_aim(episode, obs)
+                            # residual_goal = self.get_residual_goal_with_aim(episode, obs)
                             # qs = np.array(qs, dtype = float)
-                            # residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
+                            residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
+                            if residual_goal is None:
+                                residual_goal = self.get_residual_goal_with_random(obs)
                             # residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
 
                         else:
-                            residual_goal = self.get_residual_goal_with_random(obs)
+                            # residual_goal = self.get_residual_goal_with_random(obs)
                             # qs = np.array(qs, dtype = float)
-                            # residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
+
+                            residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
+                            if residual_goal is None:
+                                residual_goal = self.get_residual_goal_with_random(obs)
                             # residual_goal = self.get_residual_goal_with_nonNML(episode, obs)
                         self.env.reset_goal(residual_goal)
                         obs[-self.env.goal_dim:] = residual_goal.copy()
@@ -719,14 +724,14 @@ class Workspace(object):
                         self.env.original_goal_success = True
                         if (self.cfg.use_uncertainty_for_randomwalk not in [None, 'none', 'None']) and self.step > self.get_agent().meta_test_sample_size:
                             # qs = np.array(qs, dtype = float)
-                            # residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
-                            residual_goal = self.get_residual_goal_with_random(obs)
+                            residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
+                            # residual_goal = self.get_residual_goal_with_random(obs)
 
                             # residual_goal = self.get_residual_goal_with_aim(episode, obs)
                         else:
                             # qs = np.array(qs, dtype = float)
-                            # residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
-                            residual_goal = self.get_residual_goal_with_random(obs)
+                            residual_goal = self.get_residual_goal_with_dt(episode,episode_observes, episode_acts, qs)
+                            # residual_goal = self.get_residual_goal_with_random(obs)
 
 
 

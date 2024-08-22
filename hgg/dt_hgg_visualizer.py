@@ -107,15 +107,13 @@ class Visualizer:
         i += 1
         pos = (i // fig_shape[1], i % fig_shape[1])
         ax = axs[pos[0]][pos[1]]
-        # entropy_list =[]
-        # for elem in combined_heatmap:
-        #     entropy_list.append(dt_sampler.entropy_gain(elem))
-        # entropy_list = np.array(entropy_list)
-        # scatter = ax.scatter(combined_heatmap[:, 0], combined_heatmap[:, 1], c=entropy_list, cmap='viridis', edgecolor='k')
-        # ax.set_title('Entropy Gain')
-        # cbar = ax.figure.colorbar(scatter, ax=ax, label='Entropy Gain')
-        # ax.set_xlim(-2, 10)
-        # ax.set_ylim(-2, 10)
+        if len(self.dt_sampler.debug_cluster):
+            cluster = self.dt_sampler.debug_cluster
+            ax.scatter(cluster[:, 0], cluster[:, 1], c=np.arange(len(cluster)), cmap='viridis', edgecolor='k')
+            ax.set_title('Cluster')
+            ax.set_aspect('equal')
+        ax.set_xlim(self.limits[0][0], self.limits[0][1])
+        ax.set_ylim(self.limits[1][0], self.limits[1][1])
         # ax.set_aspect('equal')  # Ensuring equal aspect ratio
         # ax.grid(True)
 

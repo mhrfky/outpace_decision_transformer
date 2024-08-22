@@ -4,6 +4,8 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.distributions.normal import Normal
 import numpy as np
+from scipy.spatial.distance import euclidean
+from fastdtw import fastdtw
 
 class MoveOntheLastPartLoss(nn.Module):
     def __init__(self, threshold):
@@ -166,3 +168,9 @@ def calculate_max_distance(positions):
         if distance > max_distance:
             max_distance = distance
     return max_distance
+
+# Function to reorder centroids using DTW
+def reorder_centroids_dtw(original_states, centroids):
+    _, path = fastdtw(original_states, centroids, dist=euclidean)
+    reordered_centroids = [centroids[j] for i, j in path]
+    return np.array(reordered_centroids)
