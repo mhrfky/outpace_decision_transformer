@@ -50,7 +50,7 @@ class DTSampler:
 		
 		# Trajectory Buffers
 		self.trajectory_buffer = TrajectoryBuffer(100)
-		self.trajectory_reconstructor = TrajectoryReconstructor(merge_when_full=True)
+		self.trajectory_reconstructor = TrajectoryReconstructor(merge_when_full=True, final_goal=self.final_goal)
 
 		# Losses
 		self.path_similarity_loss = trajectory_similarity_loss

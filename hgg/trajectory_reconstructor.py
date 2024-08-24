@@ -7,12 +7,13 @@ from playground2 import time_decorator
 
 class TrajectoryReconstructor:
 
-    def __init__(self, buffer_size=200, n_clusters=200, merge_sample_size=5, merge_when_full=True):
+    def __init__(self, buffer_size=200, n_clusters=200, merge_sample_size=5, merge_when_full=True, final_goal = [20,20]):
         self.G = nx.Graph()
         self.states = np.array([]).reshape(0, 2)  # Initialize an empty array for states
         self.buffer_size = buffer_size
         self.n_clusters = n_clusters
         self.merge_sample_size = merge_sample_size
+        self.final_goal = final_goal
         if merge_when_full:
             self.cleaning_func = self.merge_states_using_kmeans
         else:
@@ -90,15 +91,19 @@ class TrajectoryReconstructor:
                 new_trajectory, new_rtgs = self.concat_original_with_new(new_trajectory, len_traj , i, rewards, new_rewards)
                 yield new_trajectory, new_rtgs, len_traj
             
+    
+
+        
 
     def get_shortest_jump_tree(self, states, top_n=50, pick_n=10, eval_fn=None):
         max_distance = 1.5 # calculate_max_distance(states)
-        state = np.array([0, 0])
-        states = np.vstack((state, states))
+        start_state = np.array([0, 0])
+        
+        states = np.vstack((start_state, states))
         self.add_trajectory(states, max_distance)
-
         if len(self.states) >= self.buffer_size:
             self.cleaning_func(max_distance)
+        self.add_trajectory(np.array([self.final_goal]), max_distance)
 
         g_rewards = eval_fn(self.states, None)[0] 
         s_rewards = eval_fn(states, None)[0]
@@ -111,10 +116,10 @@ class TrajectoryReconstructor:
         # Step 2: Sort the paths by the length (weight) in descending order
         sorted_paths = sorted(shortest_paths.items(), key=lambda item: shortest_path_lengths[item[0]], reverse=True)
         paths = np.array([path for _, path in sorted_paths], dtype=object)
-        nodes = np.array([node for node, _ in sorted_paths])
+        nodes_ids = np.array([node for node, _ in sorted_paths])
 
         # Step 3: Select the top n paths
-        top_n_paths = nodes[:top_n]
+        top_n_paths = nodes_ids[:top_n]
         # Select 'pick_n' unique random indices from the range of top_n_paths length
         selected_indices = np.random.choice(len(top_n_paths), size=pick_n, replace=False)
 
@@ -125,18 +130,21 @@ class TrajectoryReconstructor:
         # Step 4: Yield the results
         for  node in pick_n_paths:
             for i in range(1,len(states), 20):
-                state = states[i]
-                state = self.find_first_close_state(state)
-                if state is None:
+                start_state = states[i]
+                start_state = self.find_first_close_state(start_state)
+                if start_state is None:
                     i -= 15
                     continue
-                path, temp_rewards = self.shortest_path_trajectory(g_rewards, start_index= state, end_index= node)
-
-                path_to_yield = np.concatenate((states[:i], path[:10]))
-                path_rtgs = np.concatenate((s_rewards[:i],temp_rewards[:10]))
+                path, temp_rewards = self.shortest_path_trajectory(g_rewards, start_index= start_state, end_index= node)
+                connection_to_final, rewards_till_final = self.shortest_path_trajectory(g_rewards, start_index= node, end_index= len(self.states)-1)
+                if connection_to_final is not None:
+                    path = np.vstack((path, connection_to_final))
+                    temp_rewards = np.hstack((temp_rewards, rewards_till_final))
+                path_to_yield = np.concatenate((states[:i], path[:20]))
+                path_rtgs = np.concatenate((s_rewards[:i],temp_rewards[:20]))
                 path_rtgs -= path_rtgs[0]
                 path_rtgs = path_rtgs[::-1].copy()
-                yield path_to_yield, path_rtgs, min(10, len(path))
+                yield path_to_yield, path_rtgs, min(20, len(path))
 
     @time_decorator
     def merge_states_using_kmeans(self, max_distance):
