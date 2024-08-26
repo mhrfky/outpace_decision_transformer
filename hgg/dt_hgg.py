@@ -14,7 +14,7 @@ from hgg.trajectory_buffer import TrajectoryBuffer
 from video import VideoRecorder
 from hgg.trajectory_reconstructor import TrajectoryReconstructor
 from hgg.utils import calculate_max_distance
-from playground2 import time_decorator
+from debug_utils import time_decorator
 from debug_utils import plot_positions, plot_two_array_positions
 from hgg.loss_utils import cubic_spline_interpolation_loss, trajectory_similarity_loss
 from sklearn.cluster import KMeans
@@ -27,7 +27,7 @@ class DTSampler:
 				agent = None,
 				add_noise_to_goal= False, beta = 2, gamma=-1, sigma = 1, device = 'cuda',
 				dt : DecisionTransformer = None,  optimizer = None,
-				video_recorder : VideoRecorder = None, rescale_rewards = True, env_name = "PointUMaze-v0"
+				video_recorder : VideoRecorder = None, rescale_rewards = True, env_name = "PointUMaze-v0", max_ep_length=128
 				):
 		if env_name in ['AntMazeSmall-v0', 'PointUMaze-v0']:
 			self.final_goal = np.array([0., 8.])
@@ -35,7 +35,7 @@ class DTSampler:
 			self.final_goal = np.array([8., -8.])
 		elif env_name in ["PointNMaze-v0"]:
 			self.final_goal = np.array([8., 16.])
-
+		self.max_ep_length = max_ep_length
 		self.eval_env = goal_eval_env
 		self.dt = dt
 		self.device = device
@@ -61,7 +61,7 @@ class DTSampler:
 		self.limits_map = {"PointUMaze-v0": [[-2,10],[-2,10]], "PointSpiralMaze-v0": [[-10,10],[-10,10]], "PointNMaze-v0": [[-2,10],[-2,18]]}
 		self.limits = self.limits_map[self.env_name]
 		
-
+		
 		self.latest_desired_goal = self.final_goal
 		self.max_rewards_so_far = []
 		self.residual_goals_debug = np.array([]).reshape(0,2)
@@ -170,7 +170,7 @@ class DTSampler:
 	def train(self, achieved_states, rtgs):
 		goals_predicted_debug_np = np.array([[0,0]])
 		max_distance = calculate_max_distance(achieved_states)	
-		self.residual_goal_length = 5
+		self.residual_goal_length = 0
 		for trajectory, rtgs_t, traj_len in self.trajectory_reconstructor.get_shortest_jump_tree(achieved_states, top_n=25, eval_fn = self.value_estimator.get_state_values, pick_n= 10):
 
 			trajectory_t 								= torch.tensor(trajectory, device="cuda", dtype=torch.float32).unsqueeze(0)
@@ -184,27 +184,23 @@ class DTSampler:
 			input_timesteps_t 							= timesteps_t[:, :-traj_len]
 			input_rtgs_t								= input_rtgs_t.unsqueeze(-1)
 
-			generated_states_t, _, generated_rtgs_t, _  = self.generate_next_n_states(input_achieved_t,input_actions_t,input_rtgs_t,input_timesteps_t, n=traj_len + self.residual_goal_length) 
+			generated_states_t, _, generated_rtgs_t, _  = self.generate_next_n_states(input_achieved_t,input_actions_t,input_rtgs_t,input_timesteps_t, n=traj_len ) 
 			exploration_loss_t = 0 #self.estimate_novelty_through_embeddings(generated_states_t, traj_len + self.residual_goal_length)
-			distances_t = torch.norm(generated_states_t[-(traj_len + self.residual_goal_length+1):, 1:] - generated_states_t[-(traj_len + self.residual_goal_length+1):, :-1], dim=-1)
-			distance_to_1 = 1 - distances_t
+			distances_t = torch.norm(generated_states_t[-traj_len:, 1:] - generated_states_t[-traj_len:, :-1], dim=-1)
+			distance_to_1 = 0.5 - distances_t
 			distance_regulation_loss = torch.mean(distance_to_1 ** 2)
 
-			generated_states_t, residual_states_t 		= np.split(generated_states_t,[-self.residual_goal_length], axis= 1)
-			generated_rtgs_t 							= generated_rtgs_t[:,:-self.residual_goal_length]
-
-			total_val_t, ach_val_t, expl_val_t, q_val_t = self.value_estimator.get_state_values_t(generated_states_t[:,-traj_len-1:,:])
+			total_val_t, ach_val_t, expl_val_t, q_val_t = self.value_estimator.get_state_values_t(generated_states_t[:,-traj_len:,:])
 			rtg_values_t 								= self.reward_to_rtg(total_val_t)
 
-			goal_val_loss 								= self.goal_val_loss(rtg_values_t[:,1:], rtgs_t[:,-traj_len:])
-			rtg_pred_loss 								= self.rtg_pred_loss(generated_rtgs_t[:,-traj_len:].squeeze(-1), rtg_values_t[:,1:])
+			goal_val_loss 								= self.goal_val_loss(rtg_values_t[:,:], rtgs_t[:,-traj_len:])
+			rtg_pred_loss 								= self.rtg_pred_loss(generated_rtgs_t[:,-traj_len:].squeeze(-1), rtg_values_t[:,:])
 			_, dtw_dist, smoothness_reg 				= trajectory_similarity_loss(generated_states_t[:,-traj_len:,:].squeeze(0), trajectory_t[0,-traj_len:,:])
-
+			dtw_dist = dtw_dist / traj_len
 			q_gain_rewards_t 							= torch.diff(q_val_t)
 			state_val_gain_rewards_t 					= torch.diff(total_val_t)
 
-			total_loss =  distance_regulation_loss * 30 -exploration_loss_t  + 0.4 * dtw_dist + smoothness_reg * 0.05 + rtg_pred_loss + goal_val_loss -  2* torch.mean(q_gain_rewards_t)
-
+			total_loss =  distance_regulation_loss * 30 -exploration_loss_t  + 0.4 * dtw_dist + smoothness_reg * 0.05 + rtg_pred_loss + goal_val_loss
 			self.state_optimizer.zero_grad()
 			total_loss.backward(retain_graph=True)
 			torch.nn.utils.clip_grad_norm_(self.dt.parameters(), 0.25)
@@ -242,6 +238,29 @@ class DTSampler:
 
 		return achieved_states_t, actions_t, rtgs_t, timesteps_t
 	
+	def forward_n_times(self, achieved_states_t, actions_t, rtgs_t, timesteps_t, n= 10):
+		if not isinstance(achieved_states_t, torch.Tensor):
+			achieved_states_t = torch.tensor(achieved_states_t, device="cuda", dtype=torch.float32)
+		if not isinstance(actions_t, torch.Tensor):
+			actions_t = torch.tensor(actions_t, device="cuda", dtype=torch.float32)
+		if not isinstance(rtgs_t, torch.Tensor):
+			rtgs_t = torch.tensor(rtgs_t, device="cuda", dtype=torch.float32)
+		if not isinstance(timesteps_t, torch.Tensor):
+			timesteps_t = torch.tensor(timesteps_t, device="cuda", dtype=torch.float32)
+
+		init_goal_t = torch.tensor(self.init_goal, device="cuda", dtype=torch.float32).unsqueeze(0)
+		init_rtg    = rtgs_t[0,0].unsqueeze(0).unsqueeze(0)
+		init_action = torch.tensor([0,0], device="cuda", dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+		for _ in range(n):
+			predicted_state_mean_t, predicted_state_logvar, predicted_action_t, predicted_rtg_t = self.dt.forward(
+				achieved_states_t, actions_t, None, rtgs_t, timesteps_t)
+        	
+			achieved_states_t = torch.cat((init_goal_t.unsqueeze(0), predicted_state_mean_t), dim=1)
+			actions_t = torch.cat((init_action, predicted_action_t), dim=1)
+			rtgs_t = torch.cat((init_rtg, predicted_rtg_t), dim=1)
+			timesteps_t = torch.concat((timesteps_t, torch.tensor([timesteps_t[0][-1] + 1], device="cuda").unsqueeze(0)), dim = 1)
+
+		return achieved_states_t, actions_t, rtgs_t, timesteps_t
 	def get_ordered_k_means_clusterings(self, states, k=4):
 		# Perform K-means clustering
 		kmeans = KMeans(n_clusters=k).fit(states)
@@ -266,42 +285,32 @@ class DTSampler:
 	@time_decorator
 	def sample(self, episode_observes = None, episode_acts = None, qs = None):
 		if episode_observes is None or qs is None or episode_acts is None:
-			if self.latest_achieved is None:
-				return np.array([0,8])
-			actions_t = torch.tensor([[0,0]], device="cuda", dtype=torch.float32).unsqueeze(0)
-			rtgs_t = torch.tensor([[3]], device="cuda", dtype=torch.float32).unsqueeze(2)
-			achieved_goals_states_t = torch.tensor([[0,0]],device="cuda", dtype=torch.float32).unsqueeze(0)
-			
-			generated_states_t, _,_,_ = 	self.generate_next_n_states(self.latest_achieved[:,:1], self.latest_acts[:,:1], np.expand_dims(self.latest_rtgs[:,:1],axis=-1) + 0.1, torch.arange(1, device="cuda").unsqueeze(0), n = 100)
+			with torch.no_grad():
 
-			generated_states = generated_states_t.squeeze(0).detach().cpu().numpy()	
-			generated_clusters = self.get_ordered_k_means_clusterings(generated_states, k=4)
+				if self.latest_achieved is None:
+					return self.final_goal
+				actions_t = torch.tensor([[0,0]], device="cuda", dtype=torch.float32).unsqueeze(0)
+				rtgs_t = torch.tensor([[3]], device="cuda", dtype=torch.float32).unsqueeze(2)
+				achieved_goals_states_t = torch.tensor([[0,0]],device="cuda", dtype=torch.float32).unsqueeze(0)
+				
+				generated_states_t, _,_,_ = 	self.generate_next_n_states(self.latest_achieved[:,:1], self.latest_acts[:,:1], np.expand_dims(self.latest_rtgs[:,:1],axis=-1) + 0.1, torch.arange(1, device="cuda").unsqueeze(0), n = self.max_ep_length - 1)
 
-			self.debug_cluster = generated_clusters
-			goal = generated_clusters[1]
-			self.generated_clusters = generated_clusters[2:]
-			self.latest_desired_goal = goal
-			self.sampled_goals = np.concatenate((self.sampled_goals, [goal]))
-			self.sampled_states = np.concatenate((self.sampled_states, generated_states[-10:]))
-			return goal
+				generated_states = generated_states_t.squeeze(0).detach().cpu().numpy()	
+				generated_clusters = self.get_ordered_k_means_clusterings(generated_states, k=4)
+
+				self.debug_cluster = generated_clusters
+				goal = generated_clusters[1]
+				self.generated_clusters = generated_clusters[2:]
+				self.latest_desired_goal = goal
+				self.sampled_goals = np.concatenate((self.sampled_goals, [goal]))
+				self.sampled_states = np.concatenate((self.sampled_states, generated_states[-10:]))
+				return goal
 		else:
 			if len(self.generated_clusters) == 0 :
 				return None
 			goal = self.generated_clusters[0]
 			self.generated_clusters = self.generated_clusters[1:]
-			# states = np.array([self.eval_env.convert_obs_to_dict(episode_observes[i])["achieved_goal"] for i in range(len(episode_observes))])
-			# actions = np.array(episode_acts)
 
-			# rewards, achieved_values, exploration_values, q_values = self.value_estimator.get_state_values(states, qs)
-			# rtgs = self.reward_to_rtg(rewards)
-   
-			# achieved_goals_states_t = torch.tensor([states], device="cuda", dtype=torch.float32)
-			# rtgs_t = torch.tensor([rtgs], device="cuda", dtype=torch.float32).unsqueeze(2) + self.residual_goal_rtg_increase
-			# actions_t = torch.tensor([actions], device="cuda", dtype=torch.float32)#.unsqueeze(0)
-			# n = 110 - achieved_goals_states_t.shape[1]
-			# generated_states_t, _,_,_ = self.generate_next_n_states(achieved_goals_states_t, actions_t, rtgs_t, torch.arange(achieved_goals_states_t.shape[1], device="cuda").unsqueeze(0), n = n)
-			# generated_states = generated_states_t.squeeze(0).detach().cpu().numpy()
-			# goal = generated_states[-1]
 			self.residual_this_episode = True
 			self.residual_goals_debug = np.vstack((self.residual_goals_debug, goal))
 			self.residuals_till_now = np.vstack((self.residuals_till_now, [goal]))

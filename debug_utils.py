@@ -1,6 +1,6 @@
 import numpy as np
 import os
-
+import time
 import matplotlib.pyplot as plt
 
 def plot_positions(positions):
@@ -65,3 +65,20 @@ def plot_two_array_positions(positions, positions_2):
     plt.savefig(f'debug/debug{latest_index + 1}.png')
     plt.show()
     plt.close()
+
+def time_decorator(func):
+    def wrapper(*args, **kwargs):
+        start_time = time.time()  # Record the start time
+        result = func(*args, **kwargs)  # Call the function
+        end_time = time.time()  # Record the end time
+        elapsed_time = end_time - start_time  # Calculate the elapsed time
+        
+        # Ensure the directory exists
+        os.makedirs('debug', exist_ok=True)
+        
+        # Open the log file and append the timing information
+        with open('debug/timesteps.log', 'a') as f:
+            f.write(f"Function '{func.__name__}'\ttook {elapsed_time:.4f} seconds to complete.\n")
+        
+        return result
+    return wrapper

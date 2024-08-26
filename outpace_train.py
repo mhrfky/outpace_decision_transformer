@@ -9,7 +9,6 @@ import copy
 import pickle as pkl
 import sys
 import time
-from watchpoints import watch
 import numpy as np
 from queue import Queue
 import hydra
@@ -22,7 +21,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from hgg.hgg import goal_distance
 from visualize.visualize_2d import *
-from playground2 import time_decorator
+from debug_utils import time_decorator
 torch.backends.cudnn.benchmark = True
 
 class UniformFeasibleGoalSampler:
@@ -217,7 +216,7 @@ class Workspace(object):
         if cfg.use_hgg:
             from hgg.hgg import TrajectoryPool, MatchSampler            
             self.init_hgg_achieved_trajectory_pool(cfg)
-            self.init_hgg_sampler(cfg)
+            # self.init_hgg_sampler(cfg)
        
             
         self.init_video_recorders(cfg)
@@ -228,16 +227,24 @@ class Workspace(object):
 
     def init_dt_sampler(self, obs_dim, goal_dim):
 
+        if self.cfg.env in ["PointSpiralMaze-v0"]:
+            max_length = 256
+            max_ep_length = 256
+            hidden_size = 256
+        else:
+            max_length = 128
+            max_ep_length = 128
+            hidden_size = 128
         dt = DecisionTransformer(state_dim = 2,
                                  act_dim= 2,
-                                 max_length = 128, 
-                                 max_ep_len= 128,
-                                 hidden_size = 128,
+                                 max_length = max_length, 
+                                 max_ep_len= max_ep_length,
+                                 hidden_size = hidden_size,
                                  n_layer = 3, # TODO check this out
                                  n_head = 1, #TODO check this out
-                                 n_inner = 4* 128,
+                                 n_inner = 4* hidden_size,
                                  activation_func = 'relu', # TODO check out other loss functions that can be used
-                                 n_positions = 1024,
+                                 n_positions = hidden_size * 4,
                                  resid_pdrop = 0.1,
                                  attn_pdrop = 0.1)
         
@@ -249,7 +256,7 @@ class Workspace(object):
         dt = dt.to(device=self.device)
 
         env_name = get_original_final_goal(self.cfg.env)
-        self.dt_sampler = DTSampler(self.env, self.eval_env, agent = self.get_agent(), optimizer= optimizer, dt= dt, video_recorder=self.train_video_recorder, env_name=self.cfg.env)
+        self.dt_sampler = DTSampler(self.env, self.eval_env, agent = self.get_agent(), optimizer= optimizer, dt= dt, video_recorder=self.train_video_recorder, env_name=self.cfg.env, max_ep_length = max_ep_length)
 
     def init_env(self,cfg):
         cfg.max_episode_timesteps = max_episode_timesteps_dict[cfg.env]
@@ -790,10 +797,8 @@ class Workspace(object):
             temp_episode_observes = copy.deepcopy(episode_observes)
             temp_episode_ag = []                                        
                      # NOTE : should it be [obs, ag] ?
-            if 'aim_f' in self.hgg_sampler.cost_type or 'meta_nml' in self.hgg_sampler.cost_type:
-                temp_episode_init = self.eval_env.convert_obs_to_dict(temp_episode_observes[0])['achieved_goal'] # for bias computing
-            else:    
-                raise NotImplementedError
+            temp_episode_init = self.eval_env.convert_obs_to_dict(temp_episode_observes[0])['achieved_goal'] # for bias computing
+
                         
 
             for k in range(len(temp_episode_observes)):
