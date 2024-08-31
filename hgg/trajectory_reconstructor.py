@@ -7,38 +7,41 @@ from debug_utils import time_decorator
 class TrajectoryReconstructor:
 
     def __init__(self, buffer_size=200, n_clusters=200, merge_sample_size=5, merge_when_full=True, final_goal=[20,20], max_step=256):
-        self.G = nx.Graph()
-        self.states = np.array([]).reshape(0, 2)  # Initialize an empty array for states
-        self.timesteps = np.array([])  # Initialize an empty array for timesteps
-        self.buffer_size = buffer_size
-        self.n_clusters = n_clusters
-        self.merge_sample_size = merge_sample_size
-        self.final_goal = final_goal
-        self.max_step = max_step
-        self.time_predictor = TimePredictor(2, evaluator=self.weighted_mean_timestep, limits=[[-2,20],[-2,20]])
-        if merge_when_full:
-            self.cleaning_func = self.merge_states_using_kmeans
-        else:
-            self.cleaning_func = self.remove_oldest_states
+            self.G = nx.Graph()
+            self.states = np.array([]).reshape(0, 2)  # Initialize an empty array for states
+            self.timesteps = np.array([])  # Initialize an empty array for timesteps
+            self.merge_counts = np.array([])  # Initialize an empty array for merge counts
+            self.buffer_size = buffer_size
+            self.n_clusters = n_clusters
+            self.merge_sample_size = merge_sample_size
+            self.final_goal = final_goal
+            self.max_step = max_step
+            self.time_predictor = TimePredictor(2, evaluator=self.check_if_close, limits=[[-10,10],[-10,10]])
+            if merge_when_full:
+                self.cleaning_func = self.merge_states_using_kmeans
+            else:
+                self.cleaning_func = self.remove_oldest_states
 
     def create_graph(self, states, max_distance):
         self.states = states
+        self.merge_counts = np.ones(len(states))  # Initialize merge counts to 1 for each state
         for i in range(len(states)):
-            self.G.add_node(i, pos=states[i], timestep=i)  # Add timestep as a node attribute
+            self.G.add_node(i, pos=states[i], timestep=i, merge_count=self.merge_counts[i])  # Add merge_count as a node attribute
             for j in range(i + 1, len(states)):
                 distance = np.linalg.norm(states[i] - states[j])
                 if distance <= max_distance:
                     self.G.add_edge(i, j, weight=distance)
 
-    @time_decorator
     def add_trajectory(self, trajectory, max_distance):
         start_index = len(self.states)
         timesteps = np.arange(start_index, start_index + len(trajectory))  # Generate timesteps for new trajectory
+        merge_counts = np.ones(len(trajectory))  # Initialize merge counts to 1 for new states
         self.states = np.vstack((self.states, trajectory))
         self.timesteps = np.hstack((self.timesteps, timesteps))  # Append new timesteps
+        self.merge_counts = np.hstack((self.merge_counts, merge_counts))  # Append new merge counts
 
         for i in range(start_index, len(self.states)):
-            self.G.add_node(i, pos=self.states[i], timestep=self.timesteps[i])
+            self.G.add_node(i, pos=self.states[i], timestep=self.timesteps[i], merge_count=self.merge_counts[i])
             for j in range(len(self.states)):
                 if i != j:
                     distance = np.linalg.norm(self.states[i] - self.states[j])
@@ -53,7 +56,7 @@ class TrajectoryReconstructor:
                 pos_v = self.G.nodes[v]['pos']
                 return np.linalg.norm(np.array(pos_u) - np.array(pos_v))
 
-            shortest_path_indices = astar_path(self.G, source=start_index, target=end_index, heuristic=heuristic, weight='weight')
+            shortest_path_indices = astar_path(self.G, source=start_index, target=end_index, heuristic=heuristic, weight=self.get_edge_weight)
             shortest_path_states = self.states[shortest_path_indices]
             shortest_path_rewards = rewards[shortest_path_indices]
             return shortest_path_states, shortest_path_rewards
@@ -68,7 +71,9 @@ class TrajectoryReconstructor:
             self.add_trajectory(states, max_distance)
             if len(self.states) >= self.buffer_size:
                 self.cleaning_func(max_distance)
-            self.time_predictor.train(epochs=100)
+
+            self.time_predictor.train(random_sample_size=1000, positives= self.states)
+            
             g_rewards = eval_fn(self.states, None)[0] 
             s_rewards = eval_fn(states, None)[0]
             root = self.find_first_close_state([0,0])
@@ -89,7 +94,7 @@ class TrajectoryReconstructor:
             timesteps_t = self.time_predictor.predict(nodes_t)
             timesteps = timesteps_t.cpu().detach().numpy().flatten()
             top_n_paths = top_n_paths[timesteps.argsort()]
-            pick_n_paths = top_n_paths[-pick_n:]
+            pick_n_paths = top_n_paths[:pick_n]
             # If top_n_paths is a list, use list comprehension to pick the paths
             
             
@@ -103,31 +108,32 @@ class TrajectoryReconstructor:
                         continue
                     path, temp_rewards = self.shortest_path_trajectory(g_rewards, start_index= start_state, end_index= node)
 
-                    path_to_yield = np.concatenate((states[:i], path[:20]))
-                    path_rtgs = np.concatenate((s_rewards[:i],temp_rewards[:20]))
+                    path_to_yield = np.concatenate((states[:i], path[:10]))
+                    path_rtgs = np.concatenate((s_rewards[:i],temp_rewards[:10]))
                     path_rtgs -= path_rtgs[0]
                     path_rtgs = path_rtgs[::-1].copy()
-                    yield path_to_yield, path_rtgs, min(20, len(path))
+                    yield path_to_yield, path_rtgs, min(20, len(path_to_yield) -1)
 
-    @time_decorator
     def merge_states_using_kmeans(self, max_distance):
         """Merge densely clustered states using K-means and keep isolated points to maintain expansiveness."""
         kmeans = KMeans(n_clusters=self.n_clusters, random_state=0).fit(self.states)
         labels = kmeans.labels_
         centroids = kmeans.cluster_centers_
         min_timesteps = np.full(self.n_clusters, np.inf)
+        merge_counts = np.zeros(self.n_clusters)
 
-        # Update min_timesteps for each centroid
+        # Update min_timesteps and merge_counts for each centroid
         for i, label in enumerate(labels):
             min_timesteps[label] = min(min_timesteps[label], self.timesteps[i])
+            merge_counts[label] += self.merge_counts[i]  # Accumulate merge counts
 
         new_states = centroids
         new_timesteps = min_timesteps
         new_graph = nx.Graph()
 
-        # Create new nodes for centroids and attach position and timestep as node attributes
+        # Create new nodes for centroids and attach position, timestep, and merge count as node attributes
         for i in range(len(new_states)):
-            new_graph.add_node(i, pos=new_states[i], timestep=new_timesteps[i])  # Attach position and timestep as node attributes
+            new_graph.add_node(i, pos=new_states[i], timestep=new_timesteps[i], merge_count=merge_counts[i])  # Attach merge_count as node attribute
 
         # Compute distances between centroids and add edges
         for i in range(self.n_clusters):
@@ -137,9 +143,10 @@ class TrajectoryReconstructor:
                 if i != j and distance <= max_distance:
                     new_graph.add_edge(i, j, weight=distance)
 
-        # Update the states, timesteps, and graph
+        # Update the states, timesteps, merge_counts, and graph
         self.states = new_states
         self.timesteps = new_timesteps
+        self.merge_counts = merge_counts
         self.G = new_graph
 
     @time_decorator
@@ -181,6 +188,11 @@ class TrajectoryReconstructor:
             if distance <= 1:
                 return i
         return None
+    def check_if_close(self, input_state, d=1):
+        distances = np.linalg.norm(self.states - input_state, axis=1)
+        within_distance_indices = np.where(distances <= d)[0]
+        return int(len(within_distance_indices) > 0)
+
 
     def weighted_mean_timestep(self, input_state, d=1):
 
@@ -198,18 +210,28 @@ class TrajectoryReconstructor:
         nearby_timesteps = self.timesteps[within_distance_indices]
         weighted_mean = np.sum(weights * nearby_timesteps) / np.sum(weights)
         weighted_mean /= self.max_step
-        return weighted_mean
+        return weighted_mean  
+    def get_edge_weight(self, u, v, edge_attr=None):
+        """Calculate the weight between two nodes based on reverse visitation counts."""
+        merge_count1 = self.G.nodes[u]['merge_count']
+        merge_count2 = self.G.nodes[v]['merge_count']
+        visitation_weight = 1 / (merge_count1 + merge_count2)  # Reverse visitation count
+        distance = np.linalg.norm(self.G.nodes[u]['pos'] - self.G.nodes[v]['pos'])
+        return (distance ** 2) * visitation_weight  # Combine distance with reverse visitation weight
+
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 class TimePredictor:
-    def __init__(self, input_size, hidden_size=64, output_size=1, learning_rate=0.001, evaluator=None, limits=[[-2,10],[-2,10]]):
+    def __init__(self, input_size, hidden_size=64, output_size=1, learning_rate=0.001, weight_decay=1e-4, evaluator=None, limits=[[-2,10],[-2,10]]):
         self.model = TimePredictionModel(input_size)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
-        self.criterion = nn.MSELoss()
+        self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        self.criterion = nn.BCELoss()
         self.evaluator = evaluator
         self.limits = limits
-    def get_batch(self,batch_size):
+    
+    def get_random_batch(self, batch_size):
         xs = []
         ys = []
         for _ in range(batch_size):
@@ -220,18 +242,41 @@ class TimePredictor:
             xs.append(x)
             ys.append(y)
         return torch.stack(xs), torch.stack(ys)
-    def train(self,  epochs=100):
-        xs,ys = self.get_batch(1000)
-
-        for _ in range(len(xs)):
-            self.optimizer.zero_grad()
-            output = self.model(xs)
-            loss = self.criterion(output, ys)
-            loss.backward()
-            self.optimizer.step()
+    
+    def train(self, positives=None, random_sample_size=300, batch_size=64, epochs=1):
+        for epoch in range(epochs):
+            random_xs, random_ys = self.get_random_batch(random_sample_size)
             
+            if positives is not None:
+                positives = torch.tensor(positives, device='cuda', dtype=torch.float32)
+                values = torch.ones(positives.size(0), device='cuda', dtype=torch.float32)
+                
+                # Combine random batch with positive examples
+                xs = torch.cat((random_xs, positives), dim=0)
+                ys = torch.cat((random_ys, values), dim=0)
+            else:
+                xs = random_xs
+                ys = random_ys
+            
+            # Shuffle the combined dataset before each epoch
+            permutation = torch.randperm(xs.size()[0])
+            xs = xs[permutation]
+            ys = ys[permutation]
+            
+            # Train in batches
+            for i in range(0, xs.size(0), batch_size):
+                batch_xs = xs[i:i + batch_size]
+                batch_ys = ys[i:i + batch_size]
+                
+                self.optimizer.zero_grad()
+                output = self.model(batch_xs)
+                loss = self.criterion(output.squeeze(-1), batch_ys)
+                loss.backward()
+                self.optimizer.step()
+    
     def predict(self, X):
-        return self.model(X)    
+        with torch.no_grad():  # Disable gradient calculation for inference
+            return self.model(X)    
     
 class TimePredictionModel(nn.Module):
     def __init__(self, input_size):
@@ -246,4 +291,3 @@ class TimePredictionModel(nn.Module):
         x = torch.relu(self.fc2(x))
         x = self.sigmoid(self.fc3(x))
         return x
-    

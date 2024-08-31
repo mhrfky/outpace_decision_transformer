@@ -19,7 +19,10 @@ from debug_utils import plot_positions, plot_two_array_positions
 from hgg.loss_utils import cubic_spline_interpolation_loss, trajectory_similarity_loss
 from sklearn.cluster import KMeans
 from hgg.utils import reorder_centroids_dtw
-
+from hgg.trajectory_bufferer import TrajectoryBufferer
+from hgg.bayesian_predictor import BayesianPredictor
+from hgg.kmeans_regulated_subtraj_buffer import KMeansRegulatedSubtrajBuffer as Km
+from hgg.loss_utils import compute_wasserstein_distance
 debug_loc_list = []
 debug_rtg_list = []
 class DTSampler:    
@@ -35,6 +38,7 @@ class DTSampler:
 			self.final_goal = np.array([8., -8.])
 		elif env_name in ["PointNMaze-v0"]:
 			self.final_goal = np.array([8., 16.])
+		self.n = 4
 		self.max_ep_length = max_ep_length
 		self.eval_env = goal_eval_env
 		self.dt = dt
@@ -50,7 +54,7 @@ class DTSampler:
 		
 		# Trajectory Buffers
 		self.trajectory_buffer = TrajectoryBuffer(100)
-		self.trajectory_reconstructor = TrajectoryReconstructor(merge_when_full=True, final_goal=self.final_goal)
+		self.trajectory_reconstructor = TrajectoryReconstructor(merge_when_full=False, final_goal=self.final_goal)
 
 		# Losses
 		self.path_similarity_loss = trajectory_similarity_loss
@@ -68,7 +72,6 @@ class DTSampler:
 		self.latest_achieved = None
 		self.max_achieved_reward = 0
 		self.sampled_goals = np.array([]).reshape(0,2)
-		self.sampled_states = np.array([]).reshape(0,2)
 		self.debug_trajectories = []
 		self.debug_traj_lens = []
 		self.residual_goal_rtg_increase = 1
@@ -78,6 +81,11 @@ class DTSampler:
 		self.video_recorder : VideoRecorder = video_recorder
 		self.visualizer = Visualizer(self)	
 		self.debug_cluster = []
+		# self.subtrajectory_buffer  = TrajectoryBufferer(val_eval_fn=self.value_estimator.get_state_values)
+		self.subtrajectory_buffer = Km(val_eval_fn=self.value_estimator.get_state_values)
+		self.bayesian_predictor  = BayesianPredictor(evaluator=self.subtrajectory_buffer.check_if_close, limits=self.limits, final_goal=self.final_goal)
+		self.subtrajectory_buffer.path_evaluator = self.bayesian_predictor.predict
+		self.proclaimed_states, self.proclaimed_rtgs = np.array([]).reshape(0,2), np.array([]).reshape(0,2)
 	def reward_to_rtg(self,rewards):
 		return rewards - rewards[-1]
 
@@ -102,76 +110,29 @@ class DTSampler:
 		self.latest_rtgs 		= np.array([rtgs ])
 		self.latest_qs			= q_values
 		self.max_rewards_so_far.append(max(rewards))
-		self.sampled_states = np.array([]).reshape(0,2)
 		self.max_achieved_reward = max(max(rewards),self.max_achieved_reward)
 
-
+		self.subtrajectory_buffer.add_trajectory(achieved_states)
+		self.bayesian_predictor.train(np.concatenate((achieved_states,self.subtrajectory_buffer.centroid_buffer)))
 		goals_predicted_debug_np = self.train(achieved_states, rtgs)
 
-
 		if self.episode % self.log_every_n_times == 0:
-			proclaimed_states, _ , proclaimed_rtgs, _ = self.generate_next_n_states(self.latest_achieved[:,:1], self.latest_acts[:,:1], np.expand_dims(self.latest_rtgs[:,:1],axis=-1), torch.arange(1, device="cuda").unsqueeze(0), n = 90)
-			proclaimed_states = proclaimed_states.squeeze(0).detach().cpu().numpy() 
-			proclaimed_rtgs = proclaimed_rtgs.squeeze(0).detach().cpu().numpy()
-			self.visualize_value_heatmaps_for_debug(goals_predicted_debug_np, proclaimed_states, proclaimed_rtgs)
-			self.residual_this_episode = False
-			self.debug_trajectories = []
+
+				self.visualize_value_heatmaps_for_debug(goals_predicted_debug_np, self.proclaimed_states, self.proclaimed_rtgs)
+				self.residual_this_episode = False
+				self.debug_trajectories = []
 
 
 		self.residual_goals_debug = np.array([]).reshape(0,2)
 		self.debug_traj_lens = []
 
-	def estimate_novelty_through_embeddings(self, generated_states, len_traj, last_n=10):
-		if not isinstance(generated_states, torch.Tensor):
-			generated_states = torch.tensor(generated_states, device="cuda", dtype=torch.float32)
-		
-		# Get the embeddings for the generated states
-		embeddings = self.dt.get_state_embeddings(generated_states)
-		
-		# Split the embeddings into achieved and generated parts using slicing
-		achieved_embeddings = embeddings[:, :generated_states.shape[1] - len_traj]
-		generated_embeddings = embeddings[:, generated_states.shape[1] - len_traj:]
-		
-		# Initialize the loss tensor
-		loss_t = torch.tensor([0], device="cuda", dtype=torch.float32)
-		
-		# Iterate over each generated embedding
-		for gen_embedding in generated_embeddings[0]:
-			# Calculate Euclidean distance with the last n achieved embeddings
-			if achieved_embeddings.shape[1] >= last_n:
-				last_achieved_embeddings = achieved_embeddings[0, -last_n:]
-			else:
-				last_achieved_embeddings = achieved_embeddings[0]
-			
-			# Euclidean distance calculation
-			euclidean_dist = torch.norm(last_achieved_embeddings - gen_embedding.unsqueeze(0), dim=1)
-			
-			# Normalize the Euclidean distance by the square root of the embedding dimension
-			normalized_dist = euclidean_dist / torch.sqrt(torch.tensor(last_achieved_embeddings.size(1), device="cuda", dtype=torch.float32))
-			
-			# Aggregate the normalized distances (sum or mean)
-			loss_t += normalized_dist.mean()  # or .sum() depending on your application
-			
-			# Append the current generated embedding to the achieved embeddings
-			achieved_embeddings = torch.cat((achieved_embeddings, gen_embedding.unsqueeze(0).unsqueeze(1)), dim=1)
-		
-		return loss_t
-	
-
-			
-			
-	def cosine_similarity(self, a, b):
-		return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
-
-		
-		
 
 	@time_decorator
 	def train(self, achieved_states, rtgs):
 		goals_predicted_debug_np = np.array([[0,0]])
 		max_distance = calculate_max_distance(achieved_states)	
 		self.residual_goal_length = 0
-		for trajectory, rtgs_t, traj_len in self.trajectory_reconstructor.get_shortest_jump_tree(achieved_states, top_n=25, eval_fn = self.value_estimator.get_state_values, pick_n= 10):
+		for trajectory, rtgs_t, traj_len in self.subtrajectory_buffer.sample():#self.trajectory_reconstructor.get_shortest_jump_tree(achieved_states, top_n=25, eval_fn = self.value_estimator.get_state_values, pick_n= 10):
 
 			trajectory_t 								= torch.tensor(trajectory, device="cuda", dtype=torch.float32).unsqueeze(0)
 			rtgs_t 										= torch.tensor(rtgs_t, device="cuda", dtype=torch.float32).unsqueeze(0)
@@ -197,10 +158,11 @@ class DTSampler:
 			rtg_pred_loss 								= self.rtg_pred_loss(generated_rtgs_t[:,-traj_len:].squeeze(-1), rtg_values_t[:,:])
 			_, dtw_dist, smoothness_reg 				= trajectory_similarity_loss(generated_states_t[:,-traj_len:,:].squeeze(0), trajectory_t[0,-traj_len:,:])
 			dtw_dist = dtw_dist / traj_len
+			
 			q_gain_rewards_t 							= torch.diff(q_val_t)
 			state_val_gain_rewards_t 					= torch.diff(total_val_t)
 
-			total_loss =  distance_regulation_loss * 30 -exploration_loss_t  + 0.4 * dtw_dist + smoothness_reg * 0.05 + rtg_pred_loss + goal_val_loss
+			total_loss =  distance_regulation_loss * 30 -exploration_loss_t  +  dtw_dist  + rtg_pred_loss + goal_val_loss
 			self.state_optimizer.zero_grad()
 			total_loss.backward(retain_graph=True)
 			torch.nn.utils.clip_grad_norm_(self.dt.parameters(), 0.25)
@@ -281,41 +243,79 @@ class DTSampler:
 		ordered_states = np.array([states[i] for i in last_indices])
 
 		return ordered_states
+	
+	def cumulative_distance_sampling(self, states, distance_threshold = 3):
+		# Initialize the list of sampled states
+		sampled_states = [states[-1]]
+
+		cum_distance = 0
+		# Iterate over the states
+		for i in range(len(states)-2,1, -1):
+			# Calculate the distance between the current state and the last sampled state
+			distance = np.linalg.norm(states[i] - sampled_states[-1])
+
+			# If the distance exceeds the threshold, sample the state
+			if distance >= distance_threshold:
+				sampled_states.append(states[i])
+				cum_distance = 0
+
+		return np.array(sampled_states)[::-1].copy()
+	def n_checkpoint_sample(self, states, n =2):
+		# Initialize the list of intermediate goals
+		intermediate_goals = self.cumulative_distance_sampling(states, distance_threshold=3)
+		idx_distance = len(intermediate_goals) // n
+		idx_distance = max(1, idx_distance)
+		sampled_goals = intermediate_goals[::-idx_distance].copy()[:n][::-1].copy()
+		return np.array(sampled_goals)
 
 	@time_decorator
 	def sample(self, episode_observes = None, episode_acts = None, qs = None):
+		if self.latest_achieved is not None:
+
+			distances = np.linalg.norm(self.latest_achieved[0] - self.final_goal, axis=1)
+			if np.where(distances < 1 )[0].shape[0] > 0:
+				self.n -= 1
+				self.n = max(1, self.n)
+		
 		if episode_observes is None or qs is None or episode_acts is None:
 			with torch.no_grad():
 
 				if self.latest_achieved is None:
 					return self.final_goal
-				actions_t = torch.tensor([[0,0]], device="cuda", dtype=torch.float32).unsqueeze(0)
-				rtgs_t = torch.tensor([[3]], device="cuda", dtype=torch.float32).unsqueeze(2)
-				achieved_goals_states_t = torch.tensor([[0,0]],device="cuda", dtype=torch.float32).unsqueeze(0)
 				
-				generated_states_t, _,_,_ = 	self.generate_next_n_states(self.latest_achieved[:,:1], self.latest_acts[:,:1], np.expand_dims(self.latest_rtgs[:,:1],axis=-1) + 0.1, torch.arange(1, device="cuda").unsqueeze(0), n = self.max_ep_length - 1)
+				generated_states_t, _,_,_ = 	self.generate_next_n_states(self.latest_achieved[:,:1], self.latest_acts[:,:1], np.expand_dims(self.latest_rtgs[:,:1],axis=-1) + 0.1, torch.arange(1, device="cuda").unsqueeze(0), n = 100)
 
 				generated_states = generated_states_t.squeeze(0).detach().cpu().numpy()	
-				generated_clusters = self.get_ordered_k_means_clusterings(generated_states, k=4)
+				goal = generated_states[-1]
+				sampled_states = self.n_checkpoint_sample(generated_states, n=self.n)
+				self.debug_cluster = sampled_states
+				goal = sampled_states[0]
 
-				self.debug_cluster = generated_clusters
-				goal = generated_clusters[1]
-				self.generated_clusters = generated_clusters[2:]
+				# sampled_states = self.get_ordered_k_means_clusterings(generated_states, k=4)
+				# sampled_states =  self.cumulative_distance_sampling(generated_states, distance_threshold=3)
+				# self.debug_cluster = sampled_states
+				goal = sampled_states[0]
+				self.sampled_states = sampled_states[1:]
+				self.proclaimed_states = generated_states
+				if np.linalg.norm(goal - self.init_goal) < 1 and len(self.sampled_states) > 0:
+					goal = sampled_states[0]
+					sampled_states = sampled_states[1:]
 				self.latest_desired_goal = goal
-				self.sampled_goals = np.concatenate((self.sampled_goals, [goal]))
-				self.sampled_states = np.concatenate((self.sampled_states, generated_states[-10:]))
+				self.residual_goals_debug = np.vstack((self.residual_goals_debug, goal))
+				self.residuals_till_now = np.vstack((self.residuals_till_now, [goal]))
 				return goal
 		else:
-			if len(self.generated_clusters) == 0 :
+			if len(self.sampled_states) == 0 :
 				return None
-			goal = self.generated_clusters[0]
-			self.generated_clusters = self.generated_clusters[1:]
+			goal = self.sampled_states[0]
+			self.sampled_states = self.sampled_states[1:]
 
-			self.residual_this_episode = True
+			# self.residual_this_episode = True
 			self.residual_goals_debug = np.vstack((self.residual_goals_debug, goal))
 			self.residuals_till_now = np.vstack((self.residuals_till_now, [goal]))
 			print(f"Residual goal generated in episode: {self.episode} in the step : {len(episode_observes) }")
-
+			self.latest_desired_goal = goal
+			self.sampled_goals = np.concatenate((self.sampled_goals, [goal]))
 			return goal 
 	
 

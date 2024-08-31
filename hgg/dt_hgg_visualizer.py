@@ -49,6 +49,8 @@ class Visualizer:
         i += 1
         pos = (i // fig_shape[1], i % fig_shape[1])
         self.visualize_trajectories_on_time(axs[pos[0]][pos[1]])
+        circle = plt.Circle((dt_sampler.final_goal[0], dt_sampler.final_goal[1]), 2, fill=False, edgecolor='black')
+        axs[pos[0]][pos[1]].add_patch(circle)
 
         i += 1
         pos = (i // fig_shape[1], i % fig_shape[1])
@@ -58,10 +60,10 @@ class Visualizer:
         i += 1
         pos = (i // fig_shape[1], i % fig_shape[1])
         self.visualize_sampled_goals(axs[pos[0]][pos[1]])
-
-        i += 1
-        pos = (i // fig_shape[1], i % fig_shape[1])
-        self.visualize_sampled_trajectories(axs[pos[0]][pos[1]])
+        
+        # i += 1
+        # pos = (i // fig_shape[1], i % fig_shape[1])
+        # self.visualize_sampled_trajectories(axs[pos[0]][pos[1]])
 
         # i += 1
         # pos = (i // fig_shape[1], i % fig_shape[1])
@@ -76,8 +78,7 @@ class Visualizer:
         i += 1
         pos = (i // fig_shape[1], i % fig_shape[1])
         ax = axs[pos[0]][pos[1]]
-        ax.scatter(predicted_states[:20, 0], predicted_states[:20, 1], c=np.arange(len(predicted_states[:20,:])), cmap='viridis', edgecolor='k')
-        ax.scatter(predicted_states[20:, 0], predicted_states[20:, 1], c=np.arange(len(predicted_states[20:,:])), cmap='viridis', edgecolor='k')
+        ax.scatter(predicted_states[:, 0], predicted_states[:, 1], c=np.arange(len(predicted_states[:,:])), cmap='viridis', edgecolor='k')
 
         ax.set_title('Proclaimed Trajectory')
         ax.set_xlim(self.limits[0][0], self.limits[0][1])
@@ -122,13 +123,17 @@ class Visualizer:
         i += 1
         pos = (i // fig_shape[1], i % fig_shape[1])
         ax = axs[pos[0]][pos[1]]
-        # scatter = ax.scatter(dt_sampler.trajectory_reconstructor.states[:,0], dt_sampler.trajectory_reconstructor.states[:,1], c=q2s, cmap='viridis', edgecolor='k')
-        # cbar = ax.figure.colorbar(scatter, ax=ax, label='Time step')
-        # ax.set_title('Q 2')
-        # ax.set_xlim(-2, 10)
-        # ax.set_ylim(-2, 10)
-        # ax.set_aspect('equal')  # Ensuring equal aspect ratio
-        # ax.grid(True)
+        predictor = self.dt_sampler.bayesian_predictor
+        combined_heatmap_t = torch.tensor(combined_heatmap, device="cuda", dtype=torch.float32)
+        t = predictor.predict(combined_heatmap_t)
+        timestep_predictions = np.hstack((combined_heatmap, t.reshape(-1, 1)))
+        self.plot_heatmap(timestep_predictions, ax, 'Time Step Prediction')
+
+        # scatter = ax.scatter(combined_heatmap[:, 0], combined_heatmap[:, 1], c=t, cmap='viridis', edgecolor='k')
+        ax.set_xlim(self.limits[0][0], self.limits[0][1])
+        ax.set_ylim(self.limits[1][0], self.limits[1][1])
+        # colorbar = ax.figure.colorbar(scatter, ax=ax, label='Time step')
+
         
 
         # self.plot_residuals_if_exists(axs[pos[0]][pos[1]])
@@ -166,8 +171,8 @@ class Visualizer:
         ax.grid(True)
     def visualize_sampled_trajectories(self,ax):
         dt_sampler = self.dt_sampler
-        x = dt_sampler.trajectory_reconstructor.states[ :, 0]
-        y = dt_sampler.trajectory_reconstructor.states[ :, 1]
+        x = dt_sampler.subtrajectory_buffer.states[ :, 0]
+        y = dt_sampler.subtrajectory_buffer.states[ :, 1]
         scatter = ax.scatter(x, y, c = 'grey', edgecolor='k')
         trajectories = dt_sampler.debug_trajectories
         colors = ['red', 'blue', 'green', 'purple', 'orange', 'yellow', 'pink', 'cyan', 'magenta', 'brown']

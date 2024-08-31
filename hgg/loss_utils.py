@@ -58,7 +58,13 @@ def trajectory_similarity_loss(predicted_trajectory, actual_trajectory, alpha=0.
     total_loss = alpha * dtw_distance  + gamma * smoothness_reg
 
     return total_loss, dtw_distance, smoothness_reg
-
+def euclidean_distance_loss(predicted_trajectory, actual_trajectory):
+    """
+    Compute the Euclidean distance loss between two trajectories using PyTorch.
+    """
+    distance = torch.norm(predicted_trajectory - actual_trajectory, dim=1)
+    loss = torch.mean(distance)
+    return loss
 def entropy_gain(current_goals, new_goal, bandwidth=0.1):
     current_goals_tensor = torch.tensor(current_goals, dtype=torch.float32)
     new_goal_tensor = torch.tensor(new_goal, dtype=torch.float32).unsqueeze(0)
@@ -75,3 +81,31 @@ def calculate_entropy(goals, bandwidth=0.1):
     entropy = -torch.sum(density * log_density)
     return entropy
 
+def compute_wasserstein_distance(traj1, traj2):
+    """
+    Computes the Wasserstein distance between two multi-dimensional trajectories using PyTorch.
+    
+    Parameters:
+    traj1 (torch.Tensor): First trajectory, shape (n_points1, n_dims).
+    traj2 (torch.Tensor): Second trajectory, shape (n_points2, n_dims).
+
+    Returns:
+    torch.Tensor: The Wasserstein distance between the two trajectories.
+    """
+    # Ensure inputs are of type torch.Tensor
+    traj1 = torch.tensor(traj1, dtype=torch.float32) if not isinstance(traj1, torch.Tensor) else traj1
+    traj2 = torch.tensor(traj2, dtype=torch.float32) if not isinstance(traj2, torch.Tensor) else traj2
+
+    # Calculate pairwise distance matrix between points in traj1 and traj2
+    cost_matrix = torch.cdist(traj1, traj2, p=2)  # Euclidean distance matrix, shape (n_points1, n_points2)
+
+    # Uniform weights for each point (assuming each point has equal weight)
+    n_points1, n_points2 = traj1.shape[0], traj2.shape[0]
+    weight1 = torch.full((n_points1,), 1.0 / n_points1, dtype=torch.float32)
+    weight2 = torch.full((n_points2,), 1.0 / n_points2, dtype=torch.float32)
+
+    # Compute Wasserstein distance using the Kantorovich-Rubinstein duality
+    # We multiply the cost matrix by the weight vectors to get the total cost
+    wasserstein_distance = torch.sum(cost_matrix * weight1[:, None] * weight2[None, :])
+
+    return wasserstein_distance
