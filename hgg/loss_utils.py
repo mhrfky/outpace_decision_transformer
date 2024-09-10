@@ -2,62 +2,65 @@ from scipy.interpolate import splprep, splev
 import numpy as np
 import torch
 from tslearn.metrics import SoftDTWLossPyTorch
+import torch
 
+# Initialize the Soft-DTW loss function with a small gamma to focus on sharp alignment
+soft_dtw_loss = SoftDTWLossPyTorch(gamma=0.05)
 
-soft_dtw_loss = SoftDTWLossPyTorch(gamma=0.1)
-
-
-def cubic_spline_interpolation_loss(trajectory_t , residuals_t):
-    trajectory_np = trajectory_t.squeeze(0).detach().cpu().numpy()
-    residuals_t = residuals_t.squeeze(0)
-    x = trajectory_np[:,0]
-    y = trajectory_np[:,1]
-    if len(x) < 3:
-        return torch.tensor(0, device = 'cuda', dtype=torch.float32)
-    tck,u = splprep([x,y],s=1, k=2)
-
-    u_extrapolated = np.linspace(0, 1.5, num=len(x) + len(residuals_t))  # Extend beyond the original data range
-    x_extrapolated, y_extrapolated = splev(u_extrapolated, tck)
-    spline_t = torch.tensor(np.vstack((x_extrapolated, y_extrapolated)).T, device = 'cuda' ,dtype=torch.float32)
-    # plot_two_array_positions(trajectory_np,np.vstack((x_extrapolated, y_extrapolated)).T )
-    _, dtw_distance, _, _ = trajectory_similarity_loss(spline_t[-5:], residuals_t)
-    return dtw_distance
-
-def dtw_loss(predicted_trajectory, actual_trajectory):
+def compute_curvature(trajectory):
     """
-    Compute the Dynamic Time Warping (DTW) distance between two trajectories using PyTorch.
+    Compute the curvature of the trajectory, defined as the angle between consecutive segments.
+    The curvature is higher when there are sharper turns.
     """
-    n, m = predicted_trajectory.size(0), actual_trajectory.size(0)
-    dtw_matrix = torch.full((n + 1, m + 1), float('inf'), device=predicted_trajectory.device)
-    dtw_matrix[0, 0] = 0
+    diffs = torch.diff(trajectory, dim=0)  # Compute differences between consecutive points
+    angles = torch.atan2(diffs[:, 1], diffs[:, 0])  # Compute the angle of each segment
+    curvature = torch.abs(torch.diff(angles))  # Absolute difference in angles represents curvature
 
-    for i in range(1, n + 1):
-        for j in range(1, m + 1):
-            cost = torch.norm(predicted_trajectory[i - 1] - actual_trajectory[j - 1])
-            min_val = torch.min(
-                torch.min(dtw_matrix[i - 1, j], dtw_matrix[i, j - 1]), 
-                dtw_matrix[i - 1, j - 1]
-            )
-            dtw_matrix[i, j] = cost + min_val
+    return curvature.sum()
 
-    return dtw_matrix[n, m]
-
-def trajectory_similarity_loss(predicted_trajectory, actual_trajectory, alpha=0.5, beta=0.3, gamma=0.2):
+def trajectory_similarity_loss(predicted_trajectory, actual_trajectory, alpha=0.5, beta=0.5, segment_length=10, window_step=5):
     """
-    Custom loss function for trajectory similarity.
+    Custom loss function for trajectory similarity using segment-wise Soft-DTW from tslearn.
+    Incentivizes the model to correctly predict sharp turns.
     """
-    # Compute the Soft-DTW loss
-    dtw_distance = soft_dtw_loss(predicted_trajectory.unsqueeze(0), actual_trajectory.unsqueeze(0)).mean()
+    total_dtw_loss = 0
+    num_segments = 0
+    
+    # Iterate with a sliding window of length 'segment_length' and step 'window_step'
+    for start_idx in range(0, min(len(predicted_trajectory), len(actual_trajectory)) - segment_length + 1, window_step):
+        # Define the end of the current segment
+        end_idx = start_idx + segment_length
+        
+        # Extract segments
+        pred_segment = predicted_trajectory[start_idx:end_idx]
+        true_segment = actual_trajectory[start_idx:end_idx]
+        
+        # Compute Soft-DTW loss for this segment
+        dtw_distance = soft_dtw_loss(pred_segment.unsqueeze(0), true_segment.unsqueeze(0))
+        
+        # Accumulate the loss
+        total_dtw_loss += dtw_distance
+        num_segments += 1
+
+    # Calculate the average DTW loss across all overlapping segments
+    avg_dtw_loss = total_dtw_loss / num_segments if num_segments > 0 else 0
+
+    # Curvature penalty to incentivize sharp turns
+    curvature_penalty = compute_curvature(predicted_trajectory)
+
+    # Combine losses: incentivize sharp turns by subtracting the curvature penalty
+    total_loss = alpha * avg_dtw_loss - beta * curvature_penalty
+
+    return total_loss, avg_dtw_loss, curvature_penalty
 
 
 
-    # Smoothness regularization (L2 norm of differences between consecutive points)
-    smoothness_reg = torch.sum(torch.norm(torch.diff(predicted_trajectory, dim=0), dim=1)**2)
 
-    # Combine losses
-    total_loss = alpha * dtw_distance  + gamma * smoothness_reg
 
-    return total_loss, dtw_distance, smoothness_reg
+
+
+
+
 def euclidean_distance_loss(predicted_trajectory, actual_trajectory):
     """
     Compute the Euclidean distance loss between two trajectories using PyTorch.

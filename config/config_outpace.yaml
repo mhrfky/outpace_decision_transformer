@@ -6,9 +6,9 @@ defaults:
 # env
 env: ???
 action_repeat: 1
-seed: 1
+seed: 3
 # eval
-eval_frequency: 10000
+eval_frequency: 1000
 train_episode_video_freq : 100
 num_eval_episodes: 10
 # misc

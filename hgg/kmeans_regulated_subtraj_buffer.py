@@ -4,15 +4,16 @@ from sklearn.cluster import KMeans
 from scipy.stats import entropy
 from hgg.utils import calculate_max_distance
 class KMeansRegulatedSubtrajBuffer:
-    def __init__(self, max_size=100, n_centroids=200, extract_top_n=5, val_eval_fn=None, path_evaluator = None):
+    def __init__(self, max_size=100, n_centroids=200, extract_top_n=5, val_eval_fn=None, path_evaluator = None, final_goal = [4,0]):
         self.max_size = max_size
         self.n_centroids = n_centroids
         self.extract_top_n = extract_top_n
         self.trajectory_buffer = []  # Buffer for sub-trajectories
         self.trajectory_len_buffer = []
-        self.centroid_buffer = []  # Buffer for centroids
+        self.centroid_buffer = np.zeros([n_centroids,2])  # Buffer for centroids
         self.val_eval_fn = val_eval_fn
         self.path_evaluator  = path_evaluator
+        self.final_goal = final_goal
     def add_trajectory(self, trajectory):
         # Merge the raw trajectory into centroids
         self._merge_to_centroids(trajectory)
@@ -68,25 +69,52 @@ class KMeansRegulatedSubtrajBuffer:
         G = create_graph(trajectory, max_distance)
         
         # Compute shortest paths and their lengths from node 0
-        shortest_paths_in_ids = nx.single_source_dijkstra_path(G, 0)
-        shortest_path_lengths_in_ids = nx.single_source_dijkstra_path_length(G, 0)
+        shortest_path_lengths_in_ids,shortest_paths_in_ids = nx.single_source_dijkstra(G, 0)
+
+        
+        if self.final_goal is not None:
+            # Add the final goal to the graph
+            G.add_node(len(trajectory), pos=self.final_goal)
+
+            # Attempt to connect the final goal to the nearest nodes
+            final_goal_connected = False
+            for i, traj_point in enumerate(trajectory):
+                distance = np.linalg.norm(self.final_goal - traj_point)
+                if distance <= 2:
+                    G.add_edge(i, len(trajectory), weight=0)
+                    final_goal_connected = True
+
+            if final_goal_connected:
+                # Compute shortest paths and their lengths from the final goal
+                final_shortest_path_lengths, _ = nx.single_source_dijkstra(G, len(trajectory))
+
+                # Compute path differences
+                path_diff = {k: shortest_path_lengths_in_ids.get(k, 0) - final_shortest_path_lengths.get(k, 0) * 5
+                             for k in shortest_path_lengths_in_ids.keys()}
+            else:
+                # Remove the final goal node if it is not connected
+                G.remove_node(len(trajectory))
+                # Subtract 0 from all path lengths since none are connected
+                path_diff = {k: shortest_path_lengths_in_ids.get(k, 0) - 0 for k in shortest_path_lengths_in_ids.keys()}
+        else:
+            path_diff = shortest_path_lengths_in_ids
 
         # Sort paths by their length (longer paths first)
-        sorted_paths_in_ids = sorted(shortest_paths_in_ids.items(), key=lambda item: shortest_path_lengths_in_ids[item[0]], reverse=True)
+        sorted_paths_in_ids = sorted(shortest_paths_in_ids.items(), key=lambda item: path_diff[item[0]], reverse=True)
         
         # Ensure we do not exceed the number of available paths
         num_paths_to_extract = min(self.extract_top_n, len(sorted_paths_in_ids))
         
         # Extract the top N longest paths
         top_n_paths_nodes = [path for _, path in sorted_paths_in_ids[:num_paths_to_extract]]
-        top_n_paths_lengths = [shortest_path_lengths_in_ids[path[-1]] for path in top_n_paths_nodes]
+        top_n_paths_lengths = [path_diff[path[-1]] for path in top_n_paths_nodes]
         
         subtrajectories = [trajectory[path] for path in top_n_paths_nodes]
         
         return subtrajectories, top_n_paths_lengths
 
 
-
+    
 
     def sample(self):
 
@@ -118,3 +146,18 @@ class KMeansRegulatedSubtrajBuffer:
             distances = np.linalg.norm(self.centroid_buffer - input_state, axis=1)
             within_distance_indices = np.where(distances <= d)[0]
             return int(len(within_distance_indices) > 0)
+    def get_closest_points(self,sampled_goals):
+        closest_points = []
+
+        # Loop through each sampled goal
+        for goal in sampled_goals:
+            # Calculate the Euclidean distance from the goal to each point in the centroid buffer
+            distances = np.linalg.norm(self.centroid_buffer - goal, axis=1)
+            
+            # Find the index of the closest point
+            closest_index = np.argmin(distances)
+            
+            # Append the closest point to the result list
+            closest_points.append(self.centroid_buffer[closest_index])
+
+        return closest_points

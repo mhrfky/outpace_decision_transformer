@@ -22,7 +22,7 @@ class BayesianPredictor:
             xs.append(x)
             ys.append(y)
         for _ in range(self.final_goal_negative_batch_size):
-            rand_x_1, rand_x_2 = np.random.uniform(-1,1), np.random.uniform(-1,1)
+            rand_x_1, rand_x_2 = np.random.normal(0,0.5), np.random.uniform(0,0.5)
             rand = np.array([rand_x_1, rand_x_2]) / np.linalg.norm([rand_x_1, rand_x_2])
             x = self.final_goal + rand
             y = 0

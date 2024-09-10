@@ -16,13 +16,13 @@ from hgg.trajectory_reconstructor import TrajectoryReconstructor
 from hgg.utils import calculate_max_distance
 from debug_utils import time_decorator
 from debug_utils import plot_positions, plot_two_array_positions
-from hgg.loss_utils import cubic_spline_interpolation_loss, trajectory_similarity_loss
+from hgg.loss_utils import  trajectory_similarity_loss
 from sklearn.cluster import KMeans
 from hgg.utils import reorder_centroids_dtw
 from hgg.trajectory_bufferer import TrajectoryBufferer
 from hgg.bayesian_predictor import BayesianPredictor
 from hgg.kmeans_regulated_subtraj_buffer import KMeansRegulatedSubtrajBuffer as Km
-from hgg.loss_utils import compute_wasserstein_distance
+from hgg.loss_utils import euclidean_distance_loss
 debug_loc_list = []
 debug_rtg_list = []
 class DTSampler:    
@@ -65,7 +65,7 @@ class DTSampler:
 		self.limits_map = {"PointUMaze-v0": [[-2,10],[-2,10]], "PointSpiralMaze-v0": [[-10,10],[-10,10]], "PointNMaze-v0": [[-2,10],[-2,18]]}
 		self.limits = self.limits_map[self.env_name]
 		
-		
+		self.cut = 0
 		self.latest_desired_goal = self.final_goal
 		self.max_rewards_so_far = []
 		self.residual_goals_debug = np.array([]).reshape(0,2)
@@ -75,14 +75,14 @@ class DTSampler:
 		self.debug_trajectories = []
 		self.debug_traj_lens = []
 		self.residual_goal_rtg_increase = 1
-		self.log_every_n_times =  1
+		self.log_every_n_times =  5
 		self.residual_this_episode = False
 		self.residuals_till_now = np.array([]).reshape(0,2)
 		self.video_recorder : VideoRecorder = video_recorder
 		self.visualizer = Visualizer(self)	
 		self.debug_cluster = []
 		# self.subtrajectory_buffer  = TrajectoryBufferer(val_eval_fn=self.value_estimator.get_state_values)
-		self.subtrajectory_buffer = Km(val_eval_fn=self.value_estimator.get_state_values)
+		self.subtrajectory_buffer = Km(val_eval_fn=self.value_estimator.get_state_values,final_goal=self.final_goal)
 		self.bayesian_predictor  = BayesianPredictor(evaluator=self.subtrajectory_buffer.check_if_close, limits=self.limits, final_goal=self.final_goal)
 		self.subtrajectory_buffer.path_evaluator = self.bayesian_predictor.predict
 		self.proclaimed_states, self.proclaimed_rtgs = np.array([]).reshape(0,2), np.array([]).reshape(0,2)
@@ -157,12 +157,12 @@ class DTSampler:
 			goal_val_loss 								= self.goal_val_loss(rtg_values_t[:,:], rtgs_t[:,-traj_len:])
 			rtg_pred_loss 								= self.rtg_pred_loss(generated_rtgs_t[:,-traj_len:].squeeze(-1), rtg_values_t[:,:])
 			_, dtw_dist, smoothness_reg 				= trajectory_similarity_loss(generated_states_t[:,-traj_len:,:].squeeze(0), trajectory_t[0,-traj_len:,:])
-			dtw_dist = dtw_dist / traj_len
+			euc_dist  									= euclidean_distance_loss(generated_states_t[:,-traj_len:,:],  trajectory_t[0,-traj_len:,:])
 			
 			q_gain_rewards_t 							= torch.diff(q_val_t)
 			state_val_gain_rewards_t 					= torch.diff(total_val_t)
 
-			total_loss =  distance_regulation_loss * 30 -exploration_loss_t  +  dtw_dist  + rtg_pred_loss + goal_val_loss
+			total_loss =  distance_regulation_loss* 10 + dtw_dist + rtg_pred_loss + goal_val_loss + euc_dist + torch.mean(state_val_gain_rewards_t)
 			self.state_optimizer.zero_grad()
 			total_loss.backward(retain_graph=True)
 			torch.nn.utils.clip_grad_norm_(self.dt.parameters(), 0.25)
@@ -248,7 +248,6 @@ class DTSampler:
 		# Initialize the list of sampled states
 		sampled_states = [states[-1]]
 
-		cum_distance = 0
 		# Iterate over the states
 		for i in range(len(states)-2,1, -1):
 			# Calculate the distance between the current state and the last sampled state
@@ -257,26 +256,43 @@ class DTSampler:
 			# If the distance exceeds the threshold, sample the state
 			if distance >= distance_threshold:
 				sampled_states.append(states[i])
-				cum_distance = 0
 
 		return np.array(sampled_states)[::-1].copy()
-	def n_checkpoint_sample(self, states, n =2):
-		# Initialize the list of intermediate goals
-		intermediate_goals = self.cumulative_distance_sampling(states, distance_threshold=3)
-		idx_distance = len(intermediate_goals) // n
-		idx_distance = max(1, idx_distance)
-		sampled_goals = intermediate_goals[::-idx_distance].copy()[:n][::-1].copy()
+	
+	def n_checkpoint_sample(self, states, n=2):
+		# Step 1: Get intermediate goals using cumulative distance sampling
+		intermediate_goals = self.cumulative_distance_sampling(states, distance_threshold=2.5)
+		
+		# Step 2: Apply the cut to reduce the range
+		cut = min(self.cut, len(intermediate_goals) - 1)  # Use self.cut as the cut value
+
+		intermediate_goals = intermediate_goals[cut:]  # Cut from the start
+
+		# Step 3: Calculate the step size for sampling
+		idx_distance = max(1, len(intermediate_goals) // n)
+		
+		# Step 4: Ensure that at least the last element is included
+		if n >= len(intermediate_goals):
+			sampled_goals = intermediate_goals  # Take all if n is greater than remaining goals
+		else:
+			# Reverse sampling logic with gradual diminishing
+			sampled_goals = [intermediate_goals[-1]]  # Start with the last element
+			
+			current_idx = len(intermediate_goals) - 1  # Start from the end
+			while len(sampled_goals) < n:
+				# Gradually decrease the step size
+				idx_distance = max(1, current_idx // (n - len(sampled_goals)))
+				current_idx = max(0, current_idx - idx_distance)
+				sampled_goals.append(intermediate_goals[current_idx])
+
+			# Reverse to maintain correct order
+			sampled_goals.reverse()
+
 		return np.array(sampled_goals)
 
 	@time_decorator
 	def sample(self, episode_observes = None, episode_acts = None, qs = None):
-		if self.latest_achieved is not None:
 
-			distances = np.linalg.norm(self.latest_achieved[0] - self.final_goal, axis=1)
-			if np.where(distances < 1 )[0].shape[0] > 0:
-				self.n -= 1
-				self.n = max(1, self.n)
-		
 		if episode_observes is None or qs is None or episode_acts is None:
 			with torch.no_grad():
 
@@ -288,6 +304,7 @@ class DTSampler:
 				generated_states = generated_states_t.squeeze(0).detach().cpu().numpy()	
 				goal = generated_states[-1]
 				sampled_states = self.n_checkpoint_sample(generated_states, n=self.n)
+				sampled_states = self.subtrajectory_buffer.get_closest_points(sampled_states)
 				self.debug_cluster = sampled_states
 				goal = sampled_states[0]
 
@@ -303,10 +320,18 @@ class DTSampler:
 				self.latest_desired_goal = goal
 				self.residual_goals_debug = np.vstack((self.residual_goals_debug, goal))
 				self.residuals_till_now = np.vstack((self.residuals_till_now, [goal]))
+				self.sampled_goals = np.concatenate((self.sampled_goals, [goal]))
+
+				self.cut = max(self.cut-1, 0)
+				if np.linalg.norm(self.final_goal - goal) < 1:
+					return self.final_goal
 				return goal
 		else:
+
 			if len(self.sampled_states) == 0 :
 				return None
+			self.cut+=1
+
 			goal = self.sampled_states[0]
 			self.sampled_states = self.sampled_states[1:]
 
@@ -315,7 +340,8 @@ class DTSampler:
 			self.residuals_till_now = np.vstack((self.residuals_till_now, [goal]))
 			print(f"Residual goal generated in episode: {self.episode} in the step : {len(episode_observes) }")
 			self.latest_desired_goal = goal
-			self.sampled_goals = np.concatenate((self.sampled_goals, [goal]))
+			if np.linalg.norm(self.final_goal - goal) < 1:
+				return self.final_goal
 			return goal 
 	
 
