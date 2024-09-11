@@ -4,6 +4,9 @@ from scipy.interpolate import griddata
 import itertools
 from hgg.value_estimator import ValueEstimator
 import torch
+import matplotlib.image as mpimg
+import os
+import cv2  # For perspective transformation
 
 class Visualizer:
     def __init__(self, dt_sampler):
@@ -11,6 +14,56 @@ class Visualizer:
         self.value_estimator: ValueEstimator = dt_sampler.value_estimator
         self.limits = self.dt_sampler.limits
         self.history_of_number_of_states_in_reconstructor = np.array([]).reshape(0, 1)
+
+        # Define the base path for background images
+        base_image_path = os.path.join(os.getcwd(), '../../../../hgg')
+
+        # Define the background images and perspective transformation matrices for each maze type
+        self.env_settings = {
+            "PointSpiralMaze-v0": {
+                "background_image": os.path.join(base_image_path, "PointSpiralMaze_background.png"),
+                "world_coordinate": np.float32([[8, -8], [-8, -8], [-8, 8], [8, 8]]),
+                "image_coordinate": np.float32([[395, 395], [85, 395], [85, 85], [395, 85]])
+            },
+            "PointUMaze-v0": {
+                "background_image": os.path.join(base_image_path, "PointUMaze_background.png"),
+                "world_coordinate": np.float32([[8, 8], [0, 8], [0, 0], [8, 0]]),
+                "image_coordinate": np.float32([[355, 127], [124, 123], [124, 357], [355, 355]])
+            },
+            "PointNMaze-v0": {
+                "background_image": os.path.join(base_image_path, "PointNMaze_background.png"),
+                "world_coordinate": np.float32([[8, 16], [0, 16], [0, 0], [8, 0]]),
+                "image_coordinate": np.float32([[317, 85], [162, 85], [162, 395], [316, 394]])
+            },
+            "PointLongCorridor": {
+                "background_image": os.path.join(base_image_path, "PointLongCorridor_background.png"),
+                "world_coordinate": np.float32([[0, 0], [0, 12], [24, 12], [24, 0]]),
+                "image_coordinate": np.float32([[85, 305], [85, 150], [395, 150], [395, 305]])
+            }
+        }
+
+        # Retrieve the background image and transformation matrix using env_name
+        env_name = dt_sampler.env_name
+        if env_name in self.env_settings:
+            settings = self.env_settings[env_name]
+            self.background_image = mpimg.imread(settings["background_image"])
+            self.M = cv2.getPerspectiveTransform(settings["world_coordinate"], settings["image_coordinate"])
+        else:
+            raise ValueError(f"Environment '{env_name}' not found in the predefined settings.")
+
+    def calculate_perspective_transform(self, world_position):
+        # Ensure the input is a 2D point
+        if isinstance(world_position, (float, np.float32, np.float64, int)):
+            raise TypeError(f"Expected a 2D point, but got a scalar: {world_position}")
+        if len(world_position) != 2:
+            raise ValueError(f"Expected a 2D point, but got: {world_position}")
+
+        # Convert to the correct shape for perspective transformation
+        world_position = np.array(world_position, dtype=np.float32).reshape(-1, 1, 2)
+        pixel_position = cv2.perspectiveTransform(world_position, self.M)
+        pixel_x, pixel_y = pixel_position[0][0]
+        return int(pixel_x), int(pixel_y)
+
 
     def visualize_value_heatmaps_for_debug(self, goals_predicted_during_training, predicted_states, predicted_rtgs):
         dt_sampler = self.dt_sampler
@@ -32,10 +85,9 @@ class Visualizer:
         self.visualize_trajectories_on_time(dt_sampler.episode)
         self.visualize_sampled_goals(dt_sampler.episode)
         self.visualize_sampled_trajectories(dt_sampler.episode)
-        
         self.visualize_predicted_states(predicted_states, dt_sampler.episode)
 
-        # Predict time step using the bayesian predictor and plot
+        # Predict time step using the Bayesian predictor and plot
         predictor = self.dt_sampler.bayesian_predictor
         combined_heatmap_t = torch.tensor(combined_heatmap, device="cuda", dtype=torch.float32)
         t = predictor.predict(combined_heatmap_t)
@@ -63,70 +115,78 @@ class Visualizer:
 
     def visualize_sampled_trajectories(self, episode):
         plt.figure()
+        plt.imshow(self.background_image, extent=(0, self.background_image.shape[1], self.background_image.shape[0], 0))
         dt_sampler = self.dt_sampler
         trajectories = dt_sampler.debug_trajectories
         colors = ['red', 'blue', 'green', 'purple', 'orange', 'yellow', 'pink', 'cyan', 'magenta', 'brown']
 
         for i, traj in enumerate(trajectories):
-            traj = np.array(traj)
+            traj = np.array([self.calculate_perspective_transform(p) for p in traj])  # Apply transformation
             plt.plot(traj[:, 0], traj[:, 1], color=colors[i % len(colors)], linewidth=1)
-            plt.scatter(traj[:, 0], traj[:, 1], color="grey", edgecolors='k')
-            plt.scatter(traj[-1, 0], traj[-1, 1], color='red', edgecolor='k')
+            plt.scatter(traj[:, 0], traj[:, 1], color="grey", edgecolors='k')  # Original size scatter points
+            plt.scatter(traj[-1, 0], traj[-1, 1], color='red', edgecolor='k', s=50)  # Keep 'x' mark size
         plt.gca().set_aspect('equal')
-        plt.grid(True)
-        plt.xlim(self.limits[0][0], self.limits[0][1])
-        plt.ylim(self.limits[1][0], self.limits[1][1])
+        plt.xlim(0, self.background_image.shape[1])
+        plt.ylim(self.background_image.shape[0], 0)
         plt.title('Sampled Trajectories')
+        plt.axis('off')  # Turn off the axis
         plt.savefig(f'{self.dt_sampler.video_recorder.visualization_dir}/episode_{episode}_Sampled_Trajectories.jpg')
         plt.close()
 
     def visualize_sampled_goals(self, episode):
         plt.figure()
+        plt.imshow(self.background_image, extent=(0, self.background_image.shape[1], self.background_image.shape[0], 0))
         dt_sampler = self.dt_sampler
         sampled_goals = dt_sampler.sampled_goals
-        t = np.arange(0, len(sampled_goals))
-        plt.scatter(sampled_goals[:, 0], sampled_goals[:, 1], c=t, cmap='viridis', edgecolor='k')
-        plt.xlim(self.limits[0][0], self.limits[0][1])
-        plt.ylim(self.limits[1][0], self.limits[1][1])
+        sampled_goals_pixel = np.array([self.calculate_perspective_transform(goal) for goal in sampled_goals])  # Transform goals
+        t = np.arange(0, len(sampled_goals_pixel))
+        plt.scatter(sampled_goals_pixel[:, 0], sampled_goals_pixel[:, 1], c=t, cmap='viridis', edgecolor='k')  # Original size scatter points
+        plt.xlim(0, self.background_image.shape[1])
+        plt.ylim(self.background_image.shape[0], 0)
         plt.colorbar(label='Time step')
         plt.gca().set_aspect('equal')
-        plt.grid(True)
         plt.title('Sampled Goals')
+        plt.axis('off')  # Turn off the axis
         plt.savefig(f'{self.dt_sampler.video_recorder.visualization_dir}/episode_{episode}_Sampled_Goals.jpg')
         plt.close()
 
     def visualize_predicted_states(self, predicted_states, episode):
         plt.figure()
-        plt.scatter(predicted_states[:, 0], predicted_states[:, 1], c=np.arange(len(predicted_states[:, :])), cmap='viridis', edgecolor='k')
+        plt.imshow(self.background_image, extent=(0, self.background_image.shape[1], self.background_image.shape[0], 0))
+        predicted_states_pixel = np.array([self.calculate_perspective_transform(state) for state in predicted_states])  # Transform states
+        plt.scatter(predicted_states_pixel[:, 0], predicted_states_pixel[:, 1], c=np.arange(len(predicted_states_pixel)), cmap='viridis', edgecolor='k')  # Original size scatter points
         plt.title('Proclaimed Trajectory')
-        plt.xlim(self.limits[0][0], self.limits[0][1])
-        plt.ylim(self.limits[1][0], self.limits[1][1])
+        plt.xlim(0, self.background_image.shape[1])
+        plt.ylim(self.background_image.shape[0], 0)
         plt.gca().set_aspect('equal')
-        plt.grid(True)
+        plt.axis('off')  # Turn off the axis
         plt.savefig(f'{self.dt_sampler.video_recorder.visualization_dir}/episode_{episode}_Proclaimed_Trajectory.jpg')
         plt.close()
 
     def visualize_trajectories_on_time(self, episode):
         plt.figure()
+        plt.imshow(self.background_image, extent=(0, self.background_image.shape[1], self.background_image.shape[0], 0))
         dt_sampler = self.dt_sampler
         x = dt_sampler.latest_achieved[0, :, 0]
         y = dt_sampler.latest_achieved[0, :, 1]
-        t = np.arange(0, len(x))
+        coords = np.array([self.calculate_perspective_transform(p) for p in zip(x, y)])  # Transform coordinates
+        t = np.arange(0, len(coords))
         t_normalized = (t - t.min()) / (t.max() - t.min())
+
+        res_coords = np.array([self.calculate_perspective_transform(rp) for rp in dt_sampler.residual_goals_debug])  # Transform coordinates
+
         
-        # Save the scatter plot as a mappable object
-        scatter = plt.scatter(x, y, c=t_normalized, cmap='viridis', edgecolor='k')
-        plt.scatter(dt_sampler.latest_desired_goal[0], dt_sampler.latest_desired_goal[1], color='red', marker='x', s=150, label='Latest Desired Goal')
-        
-        # Use the scatter object to create the colorbar
+
+        scatter = plt.scatter(coords[:, 0], coords[:, 1], c=t_normalized, cmap='viridis', edgecolor='k')  # Original size scatter points
+        plt.scatter(res_coords[:, 0], res_coords[:, 1], c='white', s=150,marker='*' )  # Original size scatter points
+        plt.scatter(*self.calculate_perspective_transform(dt_sampler.latest_desired_goal), color='red', marker='x', s=150, label='Latest Desired Goal')  # Original size 'x' mark
+
         plt.colorbar(scatter, label='Time step')
-        plt.xlabel('X Position')
-        plt.ylabel('Y Position')
         plt.title('Position Over Time')
-        plt.xlim(self.limits[0][0], self.limits[0][1])
-        plt.ylim(self.limits[1][0], self.limits[1][1])
+        plt.xlim(0, self.background_image.shape[1])
+        plt.ylim(self.background_image.shape[0], 0)
         plt.gca().set_aspect('equal')
-        plt.grid(True)
+        plt.axis('off')  # Turn off the axis
         plt.savefig(f'{self.dt_sampler.video_recorder.visualization_dir}/episode_{episode}_Position_Over_Time.jpg')
         plt.close()
 
