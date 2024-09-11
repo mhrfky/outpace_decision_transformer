@@ -9,7 +9,6 @@ import copy
 import pickle as pkl
 import sys
 import time
-from watchpoints import watch
 import numpy as np
 from queue import Queue
 import hydra

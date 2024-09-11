@@ -24,7 +24,7 @@ from hgg.states_buffer import StatesBuffer
 from hgg.trajectory_buffer import TrajectoryBuffer
 from hgg.trajectory_sampler import identify_good_parts
 from hgg.trajectory_sampler import select_segment_indices
-from sampler_utils import shortest_path_trajectory, get_shortest_path_trajectories
+from hgg.sampler_utils import shortest_path_trajectory, get_shortest_path_trajectories
 from video import VideoRecorder
 debug_loc_list = []
 debug_rtg_list = []
@@ -144,7 +144,7 @@ class DTSampler:
 		start_ends = find_diminishing_trajectories( rtgs, dynamic_threshold=True)
 		start_ends = select_segment_indices(rtgs, 10, 0, 0.01, 2)
 		self.start_ends = start_ends
-		trajectories = get_shortest_path_trajectories(achieved_goals_states, rtgs, 5)
+		# trajectories = get_shortest_path_trajectories(achieved_goals_states, rtgs, 5)
 		
 		self.trajectory_buffer.add_trajectory(achieved_goals_states, actions, start_ends)
 		start_end_index = self.trajectory_buffer.sample(10)

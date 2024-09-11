@@ -85,7 +85,7 @@ class MatchSampler:
 		self.pool = np.tile(init_goal[np.newaxis,:],[self.length,1])+np.random.normal(0,self.delta,size=(self.length,self.dim))
 		
 
-		self.match_lib = gcc_load_lib(hgg_gcc_path+'/cost_flow.c')
+		# self.match_lib = gcc_load_lib(hgg_gcc_path+'/cost_flow.c')
 		
 		self.achieved_trajectory_pool = achieved_trajectory_pool
 
