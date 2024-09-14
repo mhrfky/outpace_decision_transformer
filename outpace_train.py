@@ -176,7 +176,7 @@ class Workspace(object):
         self.buffer_dir = utils.make_dir(self.work_dir, 'buffer')
 
         self.cfg = cfg
-
+        self.episode = 0
         self.logger = Logger(self.work_dir,
                              save_tb=cfg.log_save_tb,
                              log_frequency=cfg.log_frequency_step,
@@ -453,11 +453,12 @@ class Workspace(object):
 
     def get_buffer(self):                
         return self.expl_buffer
-        
+
 
     def evaluate(self, eval_uniform_goal=False):
         uniform_goal=False
         repeat = 2 if eval_uniform_goal else 1
+        visualizer_func = self.dt_sampler.visualizer.visualize_trajectories_on_time_on_eval
                         
         for r in range(repeat):            
             uniform_goal = True if r==1 else False
@@ -499,15 +500,16 @@ class Workspace(object):
                     
 
             
-
+                observes = np.stack(observes, axis =0)
+                obs_dict = self.eval_env.convert_obs_to_dict(observes)
+                visualizer_func(self.episode, episode, obs_dict['achieved_goal'])
                 if self.eval_env.is_successful(obs):
                     avg_episode_success_rate+=1.0
                 
                 if self.cfg.use_aim and episode==0:                
                     fig = plt.figure(figsize=(15,15))
                     sns.set_style("darkgrid")
-                    observes = np.stack(observes, axis =0)
-                    obs_dict = self.eval_env.convert_obs_to_dict(observes)
+
                     tiled_initial_obs = np.tile(obs_dict['achieved_goal'][0][None, :], (observes.shape[0], 1)) #[ts, dim]
                     
                     obs_desired_goal = obs_dict['desired_goal']                
@@ -695,6 +697,7 @@ class Workspace(object):
                 self.last_timestep_save(episode_observes, replay_buffer)
                 qs = np.array(qs, dtype = float)
                 self.dt_sampler_update(self.step, episode, episode_observes, episode_acts, qs)
+                self.episode = episode
 
                 
                     

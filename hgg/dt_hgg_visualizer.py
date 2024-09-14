@@ -190,6 +190,32 @@ class Visualizer:
         plt.savefig(f'{self.dt_sampler.video_recorder.visualization_dir}/episode_{episode}_Position_Over_Time.jpg')
         plt.close()
 
+    def visualize_trajectories_on_time_on_eval(self, episode,i, states):
+        plt.figure()
+        plt.imshow(self.background_image, extent=(0, self.background_image.shape[1], self.background_image.shape[0], 0))
+        dt_sampler = self.dt_sampler
+
+
+        final_goal_projected = self.calculate_perspective_transform(self.dt_sampler.final_goal)# Transform coordinates
+
+
+        coords = np.array([self.calculate_perspective_transform(p) for p in states])  # Transform coordinates
+        t = np.arange(0, len(coords))
+        t_normalized = (t - t.min()) / (t.max() - t.min())
+        
+
+        scatter = plt.scatter(coords[:, 0], coords[:, 1], c=t_normalized, cmap='viridis', edgecolor='k')  # Original size scatter points
+        plt.scatter(*final_goal_projected, color='red', marker='x', s=150, label='Latest Desired Goal')  # Original size 'x' mark
+
+        plt.colorbar(scatter, label='Time step')
+        plt.title('Position Over Time')
+        plt.xlim(0, self.background_image.shape[1])
+        plt.ylim(self.background_image.shape[0], 0)
+        plt.gca().set_aspect('equal')
+        plt.axis('off')  # Turn off the axis
+        plt.savefig(f'{self.dt_sampler.video_recorder.visualization_dir}/eval_episode_{episode}_Position_Over_Time_{i}.jpg')
+        plt.close()
+
     def create_combined_np(self):
         data_points = [
             [x, y]
