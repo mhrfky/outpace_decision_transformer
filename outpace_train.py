@@ -221,24 +221,35 @@ class Workspace(object):
             
         self.init_video_recorders(cfg)
         self.step = 0
-        self.init_dt_sampler(2,2)
         
         self.uniform_goal_sampler =  UniformFeasibleGoalSampler(env_name=cfg.env)
+        self.init_dt_sampler()
 
-    def init_dt_sampler(self, obs_dim, goal_dim):
+    def init_dt_sampler(self):
+        max_episode_timesteps = max_episode_timesteps_dict[self.cfg.env]
+    
+        hidden_size  = {'AntMazeSmall-v0' : 512,
+                    'PointUMaze-v0' : 128,
+                    'sawyer_peg_pick_and_place' : 256,
+                    'sawyer_peg_push' : 256,
+                    'PointNMaze-v0' : 128, 
+                    'PointSpiralMaze-v0' : 256,
+                    }[self.cfg.env]           
 
-        if self.cfg.env in ["PointSpiralMaze-v0"]:
-            max_length = 256
-            max_ep_length = 256
-            hidden_size = 256
+        lower_bounds, upper_bounds = self.uniform_goal_sampler.LOWER_CONTEXT_BOUNDS, self.uniform_goal_sampler.UPPER_CONTEXT_BOUNDS
+        if lower_bounds.shape[0] == 2:
+            limits = [[lower_bounds[0], upper_bounds[0]], [lower_bounds[1], upper_bounds[1]]]
+        elif lower_bounds.shape[0] == 3:
+            limits = [[lower_bounds[0], upper_bounds[0]], [lower_bounds[1], upper_bounds[1]], [lower_bounds[2], upper_bounds[2]]]
         else:
-            max_length = 128
-            max_ep_length = 128
-            hidden_size = 128
-        dt = DecisionTransformer(state_dim = 2,
-                                 act_dim= 2,
-                                 max_length = max_length, 
-                                 max_ep_len= max_ep_length,
+            raise NotImplementedError
+        final_goal = get_original_final_goal(self.cfg.env)
+        state_dim = final_goal.shape[0]
+
+        dt = DecisionTransformer(state_dim = state_dim,
+                                 act_dim= state_dim,
+                                 max_length = max_episode_timesteps+10, 
+                                 max_ep_len= max_episode_timesteps+10,
                                  hidden_size = hidden_size,
                                  n_layer = 3, # TODO check this out
                                  n_head = 1, #TODO check this out
@@ -255,8 +266,7 @@ class Workspace(object):
         )
         dt = dt.to(device=self.device)
 
-        env_name = get_original_final_goal(self.cfg.env)
-        self.dt_sampler = DTSampler(self.env, self.eval_env, agent = self.get_agent(), optimizer= optimizer, dt= dt, video_recorder=self.train_video_recorder, env_name=self.cfg.env, max_ep_length = max_ep_length)
+        self.dt_sampler = DTSampler(self.env, self.eval_env, agent = self.get_agent(), optimizer= optimizer, dt= dt, video_recorder=self.train_video_recorder, env_name=self.cfg.env, max_ep_length = max_episode_timesteps+10, limits=limits, final_goal= final_goal)
 
     def init_env(self,cfg):
         cfg.max_episode_timesteps = max_episode_timesteps_dict[cfg.env]
@@ -344,7 +354,7 @@ class Workspace(object):
                 
             obs_spec = self.env.observation_spec()
             action_spec = self.env.action_spec()
-            return obs_spec, action_spec
+        return obs_spec, action_spec
     def set_cfg_agent(self, cfg, obs_spec, action_spec):
         cfg.agent.action_shape = action_spec.shape
         cfg.agent.action_range = [
@@ -691,7 +701,7 @@ class Workspace(object):
 
             
             self.buffer_update(done, info, obs, replay_buffer, action, next_obs, reward, last_timestep)
-
+            
                 
             if last_timestep:
                 self.last_timestep_save(episode_observes, replay_buffer)

@@ -30,14 +30,11 @@ class DTSampler:
 				agent = None,
 				add_noise_to_goal= False, beta = 2, gamma=-1, sigma = 1, device = 'cuda',
 				dt : DecisionTransformer = None,  optimizer = None,
-				video_recorder : VideoRecorder = None, rescale_rewards = True, env_name = "PointUMaze-v0", max_ep_length=128
+				video_recorder : VideoRecorder = None, rescale_rewards = True, env_name = "PointUMaze-v0", max_ep_length=128, final_goal = np.array([0., 8.]), limits = np.array([[-10, 10], [-10, 10]])
 				):
-		if env_name in ['AntMazeSmall-v0', 'PointUMaze-v0']:
-			self.final_goal = np.array([0., 8.])
-		elif env_name == "PointSpiralMaze-v0":
-			self.final_goal = np.array([8., -8.])
-		elif env_name in ["PointNMaze-v0"]:
-			self.final_goal = np.array([8., 16.])
+		self.limits = limits
+		self.final_goal = final_goal
+		self.state_dim = self.final_goal.shape[0]
 		self.n = 4
 		self.max_ep_length = max_ep_length
 		self.eval_env = goal_eval_env
@@ -62,32 +59,38 @@ class DTSampler:
 		self.goal_val_loss = torch.nn.L1Loss()
 
 
-		self.limits_map = {"PointUMaze-v0": [[-2,10],[-2,10]], "PointSpiralMaze-v0": [[-10,10],[-10,10]], "PointNMaze-v0": [[-2,10],[-2,18]]}
-		self.limits = self.limits_map[self.env_name]
+
 		
 		self.cut = 0
 		self.latest_desired_goal = self.final_goal
-		self.max_rewards_so_far = []
-		self.residual_goals_debug = np.array([]).reshape(0,2)
+		self.residual_goals_debug = np.array([]).reshape(0,self.state_dim)
 		self.latest_achieved = None
-		self.max_achieved_reward = 0
-		self.sampled_goals = np.array([]).reshape(0,2)
+		self.sampled_goals = np.array([]).reshape(0,self.state_dim)
 		self.debug_trajectories = []
-		self.debug_traj_lens = []
 		self.residual_goal_rtg_increase = 1
 		self.log_every_n_times =  5
 		self.residual_this_episode = False
-		self.residuals_till_now = np.array([]).reshape(0,2)
+		self.residuals_till_now = np.array([]).reshape(0,self.state_dim)
 		self.video_recorder : VideoRecorder = video_recorder
 		self.visualizer = Visualizer(self)	
 		self.debug_cluster = []
 		# self.subtrajectory_buffer  = TrajectoryBufferer(val_eval_fn=self.value_estimator.get_state_values)
 		self.subtrajectory_buffer = Km(val_eval_fn=self.value_estimator.get_state_values,final_goal=self.final_goal)
-		self.bayesian_predictor  = BayesianPredictor(evaluator=self.subtrajectory_buffer.check_if_close, limits=self.limits, final_goal=self.final_goal)
+		self.bayesian_predictor  = BayesianPredictor(input_size= self.state_dim , evaluator=self.subtrajectory_buffer.check_if_close, limits=self.limits, final_goal=self.final_goal)
 		self.subtrajectory_buffer.path_evaluator = self.bayesian_predictor.predict
-		self.proclaimed_states, self.proclaimed_rtgs = np.array([]).reshape(0,2), np.array([]).reshape(0,2)
+		self.proclaimed_states, self.proclaimed_rtgs = np.array([]).reshape(0,self.state_dim), np.array([]).reshape(0,self.state_dim)
 	def reward_to_rtg(self,rewards):
-		return rewards - rewards[-1]
+		if isinstance(rewards, np.ndarray):
+			rewards_copy =  rewards.copy()
+				
+			rewards_copy -= rewards[0]
+			return rewards_copy[::-1].copy()
+		elif isinstance(rewards, torch.Tensor):
+			rewards_copy =  rewards.clone()
+			rewards_copy -= rewards[0]
+			return rewards_copy.flip(0).clone()
+		else:
+			raise ValueError("Invalid type for rewards")
 
 	@time_decorator
 	def update(self, step, episode, achieved_states, actions, qs):
@@ -109,8 +112,6 @@ class DTSampler:
 		self.latest_acts        = np.array([actions])
 		self.latest_rtgs 		= np.array([rtgs ])
 		self.latest_qs			= q_values
-		self.max_rewards_so_far.append(max(rewards))
-		self.max_achieved_reward = max(max(rewards),self.max_achieved_reward)
 
 		self.subtrajectory_buffer.add_trajectory(achieved_states)
 		self.bayesian_predictor.train(np.concatenate((achieved_states,self.subtrajectory_buffer.centroid_buffer)))
@@ -123,20 +124,20 @@ class DTSampler:
 				self.debug_trajectories = []
 
 
-		self.residual_goals_debug = np.array([]).reshape(0,2)
+		self.residual_goals_debug = np.array([]).reshape(0,self.state_dim)
 		self.debug_traj_lens = []
 
 
 	@time_decorator
 	def train(self, achieved_states, rtgs):
-		goals_predicted_debug_np = np.array([[0,0]])
+		goals_predicted_debug_np = np.array([]).reshape(0,self.state_dim)
 		max_distance = calculate_max_distance(achieved_states)	
 		self.residual_goal_length = 0
 		for trajectory, rtgs_t, traj_len in self.subtrajectory_buffer.sample():#self.trajectory_reconstructor.get_shortest_jump_tree(achieved_states, top_n=25, eval_fn = self.value_estimator.get_state_values, pick_n= 10):
 
 			trajectory_t 								= torch.tensor(trajectory, device="cuda", dtype=torch.float32).unsqueeze(0)
 			rtgs_t 										= torch.tensor(rtgs_t, device="cuda", dtype=torch.float32).unsqueeze(0)
-			actions_t 									= torch.zeros((1, trajectory_t.size(1), 2), device="cuda", dtype=torch.float32)
+			actions_t 									= torch.zeros((1, trajectory_t.size(1), self.state_dim), device="cuda", dtype=torch.float32)
 			timesteps_t 								= torch.arange(trajectory_t.size(1), device="cuda").unsqueeze(0)
 
 			input_achieved_t 							= trajectory_t[:, :-traj_len, :]
@@ -147,7 +148,7 @@ class DTSampler:
 
 			generated_states_t, _, generated_rtgs_t, _  = self.generate_next_n_states(input_achieved_t,input_actions_t,input_rtgs_t,input_timesteps_t, n=traj_len ) 
 			exploration_loss_t = 0 #self.estimate_novelty_through_embeddings(generated_states_t, traj_len + self.residual_goal_length)
-			distances_t = torch.norm(generated_states_t[-traj_len:, 1:] - generated_states_t[-traj_len:, :-1], dim=-1)
+			distances_t = torch.norm(generated_states_t[-traj_len:, 1:, :] - generated_states_t[-traj_len:, :-1, :], dim=-1)
 			distance_to_1 = 0.5 - distances_t
 			distance_regulation_loss = torch.mean(distance_to_1 ** 2)
 
@@ -171,7 +172,6 @@ class DTSampler:
 
 			goals_predicted_debug_np = np.vstack((goals_predicted_debug_np, generated_states_t.squeeze(0)[-traj_len:].detach().cpu().numpy()))
 			self.debug_trajectories.append(trajectory[-traj_len:])
-			self.debug_traj_lens.append(traj_len)
 
 		return goals_predicted_debug_np
 	@time_decorator
@@ -298,8 +298,8 @@ class DTSampler:
 
 				if self.latest_achieved is None:
 					return self.final_goal
-				
-				generated_states_t, _,_,_ = 	self.generate_next_n_states(self.latest_achieved[:,:1], self.latest_acts[:,:1], np.expand_dims(self.latest_rtgs[:,:1],axis=-1) + 0.1, torch.arange(1, device="cuda").unsqueeze(0), n = 100)
+				actions_t = torch.zeros((1, 1, self.state_dim), device="cuda", dtype=torch.float32)
+				generated_states_t, _,_,_ = 	self.generate_next_n_states(self.latest_achieved[:,:1], actions_t, np.expand_dims(self.latest_rtgs[:,:1],axis=-1) + 0.1, torch.arange(1, device="cuda").unsqueeze(0), n = 100)
 
 				generated_states = generated_states_t.squeeze(0).detach().cpu().numpy()	
 				goal = generated_states[-1]

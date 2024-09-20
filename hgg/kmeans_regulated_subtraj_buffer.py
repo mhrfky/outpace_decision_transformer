@@ -6,14 +6,15 @@ from hgg.utils import calculate_max_distance
 class KMeansRegulatedSubtrajBuffer:
     def __init__(self, max_size=100, n_centroids=200, extract_top_n=5, val_eval_fn=None, path_evaluator = None, final_goal = [4,0]):
         self.max_size = max_size
+        self.final_goal = final_goal
+        self.state_dim = final_goal.shape[0]
         self.n_centroids = n_centroids
         self.extract_top_n = extract_top_n
         self.trajectory_buffer = []  # Buffer for sub-trajectories
         self.trajectory_len_buffer = []
-        self.centroid_buffer = np.zeros([n_centroids,2])  # Buffer for centroids
+        self.centroid_buffer = np.zeros([n_centroids,self.state_dim ])  # Buffer for centroids
         self.val_eval_fn = val_eval_fn
         self.path_evaluator  = path_evaluator
-        self.final_goal = final_goal
     def add_trajectory(self, trajectory):
         # Merge the raw trajectory into centroids
         self._merge_to_centroids(trajectory)

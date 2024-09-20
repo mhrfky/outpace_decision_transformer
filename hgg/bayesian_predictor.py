@@ -14,23 +14,61 @@ class BayesianPredictor:
     def get_random_batch(self, batch_size):
         xs = []
         ys = []
+
+        # Check the number of dimensions based on limits or final goal
+        num_dimensions = len(self.limits)  # Assume limits cover all dimensions
+
+        # Generate random points within the defined limits
         for _ in range(batch_size):
-            x = [np.random.uniform(self.limits[0][0], self.limits[0][1]), np.random.uniform(self.limits[1][0], self.limits[1][1])]
+            if num_dimensions == 2:
+                # Generate a 2D random point
+                x = [np.random.uniform(self.limits[0][0], self.limits[0][1]), np.random.uniform(self.limits[1][0], self.limits[1][1])]
+            elif num_dimensions == 3:
+                # Generate a 3D random point
+                x = [np.random.uniform(self.limits[0][0], self.limits[0][1]),
+                    np.random.uniform(self.limits[1][0], self.limits[1][1]),
+                    np.random.uniform(self.limits[2][0], self.limits[2][1])]
+            else:
+                raise ValueError("Unsupported number of dimensions: must be 2 or 3.")
+
+            # Evaluate if the generated point has been explored or not
             y = self.evaluator(x)
+
+            # Convert the point and the label to torch tensors
             x = torch.tensor(x, device='cuda', dtype=torch.float32)
             y = torch.tensor(y, device='cuda', dtype=torch.float32)
+
             xs.append(x)
             ys.append(y)
+
+        # Generate negative examples near the final goal
         for _ in range(self.final_goal_negative_batch_size):
-            rand_x_1, rand_x_2 = np.random.normal(0,0.5), np.random.uniform(0,0.5)
-            rand = np.array([rand_x_1, rand_x_2]) / np.linalg.norm([rand_x_1, rand_x_2])
+            if num_dimensions == 2:
+                # Generate a 2D random point near the final goal
+                rand = np.random.normal(0, 0.5, size=2)
+            elif num_dimensions == 3:
+                # Generate a 3D random point near the final goal
+                rand = np.random.normal(0, 0.5, size=3)
+            else:
+                raise ValueError("Unsupported number of dimensions: must be 2 or 3.")
+            
+            # Normalize the random vector to keep the point close to the final goal
+            rand /= np.linalg.norm(rand)
+
+            # Add the random noise to the final goal to get a new point
             x = self.final_goal + rand
-            y = 0
+
+            # Label the point as unexplored (negative example)
+            y = 0  # Label is 0 (unexplored)
+
+            # Convert to tensors
             x = torch.tensor(x, device='cuda', dtype=torch.float32)
             y = torch.tensor(y, device='cuda', dtype=torch.float32)
+
             xs.append(x)
             ys.append(y)
-            
+
+        # Return the combined batch as torch tensors
         return torch.stack(xs), torch.stack(ys)
     
     def train(self, positives=None, random_sample_size=1000, batch_size=64, epochs=1):

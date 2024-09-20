@@ -19,7 +19,7 @@ class ValueEstimator:
         self.final_goal = final_goal
         self.num_seed_steps = num_seed_steps
         self.step = 0
-        self.init_goal = np.array([0,0])
+        self.init_goal = init_goal
         self.gamma = gamma
         self.beta = beta
         self.sigma = sigma
@@ -62,10 +62,11 @@ class ValueEstimator:
     def get_q_values(self,goal_t):
         goal = goal_t.detach().cpu().numpy()
         obs_np = self.eval_env.reset()
-        self.eval_env.wrapped_env.set_xy(goal)
-        pos_xy_np = self.eval_env.wrapped_env.get_xy()
-        obs_np[:2] = pos_xy_np[:]
-        obs_np[6:8] = pos_xy_np[:]
+        obs_dict = self.eval_env.convert_obs_to_dict(obs_np)
+        obs_dict['achieved_goal'] = goal
+        obs_np = self.eval_env.convert_dict_to_obs(obs_dict)
+        obs_t = torch.tensor(obs_np, device = "cuda", dtype = torch.float32)
+        
         with torch.no_grad():
             obs_t = torch.tensor(obs_np, device = "cuda", dtype = torch.float32)
             dist = self.agent.actor(obs_t)

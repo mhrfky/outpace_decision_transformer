@@ -28,30 +28,57 @@
         }
         ,
         {
-            "name": "playground",
+            "name": "Python: Outpace Train - Sawyer Peg Push",
             "type": "python",
             "request": "launch",
-            "program": "${workspaceFolder}/playground.py",
-            "console": "integratedTerminal",
-            "justMyCode": true
+            "program": "${workspaceFolder}/outpace_train.py",
+            "args": [
+                "env=sawyer_peg_push",
+                "aim_disc_replay_buffer_capacity=30000",
+                "normalize_nml_obs=true",
+                "normalize_f_obs=false",
+                "normalize_rl_obs=false",
+                "adam_eps=0.01",
+                "hgg_kwargs.match_sampler_kwargs.hgg_L=0.5"
+            ],
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "0"
+            },
+            "console": "integratedTerminal"
         }
         ,
         {
-            "name": "playground2",
+            "name": "Python: Outpace Train - AntMazeSmall",
             "type": "python",
             "request": "launch",
-            "program": "${workspaceFolder}/playground2.py",
-            "console": "integratedTerminal",
-            "justMyCode": true
+            "program": "${workspaceFolder}/outpace_train.py",
+            "args": [
+                "env=AntMazeSmall-v0",
+                "aim_disc_replay_buffer_capacity=50000"
+            ],
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "0"
+            },
+            "console": "integratedTerminal"
         }
         ,
         {
-            "name": "playground3",
+            "name": "sawyer_peg_pick_and_place",
             "type": "python",
             "request": "launch",
-            "program": "${workspaceFolder}/playground3.py",
-            "console": "integratedTerminal",
-            "justMyCode": true
+            "program": "${workspaceFolder}/outpace_train.py",
+            "args": [
+                "env=sawyer_peg_pick_and_place",
+                "aim_disc_replay_buffer_capacity=30000",
+                "normalize_nml_obs=true",
+                "normalize_f_obs=false",
+                "normalize_rl_obs=false",
+                "adam_eps=0.01"
+            ],
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "0"
+            },
+            "console": "integratedTerminal"
         }
     ]
 }
