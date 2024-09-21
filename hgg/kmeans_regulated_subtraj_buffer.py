@@ -114,7 +114,27 @@ class KMeansRegulatedSubtrajBuffer:
         
         return subtrajectories, top_n_paths_lengths
 
-
+    def shorten_trajectory(self, trajectory, max_states):
+        if not isinstance(trajectory, np.ndarray):
+            trajectory = np.array(trajectory)
+        
+        # Ensure trajectory length is greater than max_states
+        if len(trajectory) <= max_states:
+            return trajectory
+        
+        # Always keep the start and end points
+        start, end = trajectory[0], trajectory[-1]
+        
+        # Calculate the number of intermediate points to keep
+        num_intermediate_points = max_states - 2
+        
+        # Select equally spaced indices for intermediate points
+        indices = np.linspace(1, len(trajectory) - 2, num_intermediate_points, dtype=int)
+        
+        # Gather the reduced trajectory
+        shortened_trajectory = np.vstack([start, trajectory[indices], end])
+        
+        return shortened_trajectory
     
 
     def sample(self):
@@ -137,6 +157,7 @@ class KMeansRegulatedSubtrajBuffer:
         for subtrajectory in result_subtrajectories:
             if len(subtrajectory) == 1:
                 subtrajectory = np.array([subtrajectory[0], subtrajectory[0]])
+            self.shorten_trajectory(subtrajectory, 50)
             rewards = self.val_eval_fn(subtrajectory, None)[0]
             rewards -= rewards[0]
             rtgs = rewards[::-1].copy()
