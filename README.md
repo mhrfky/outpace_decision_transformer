@@ -26,6 +26,7 @@ cd meta-nml && pip install -r requirements.txt
 cd ..
 chmod +x install.sh
 ./install.sh
+pip install transformers==4.5.1 tokens omegaconf fastdtw tslearn scikit-learn
 ```
 3. Install [pytorch](https://pytorch.org/get-started/locally/) (use tested on pytorch 1.12.1 with CUDA 11.3)
 
