@@ -157,7 +157,7 @@ class KMeansRegulatedSubtrajBuffer:
         for subtrajectory in result_subtrajectories:
             if len(subtrajectory) == 1:
                 subtrajectory = np.array([subtrajectory[0], subtrajectory[0]])
-            self.shorten_trajectory(subtrajectory, 50)
+            subtrajectory = self.shorten_trajectory(subtrajectory, 50)
             rewards = self.val_eval_fn(subtrajectory, None)[0]
             rewards -= rewards[0]
             rtgs = rewards[::-1].copy()
