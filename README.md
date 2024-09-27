@@ -67,19 +67,6 @@ sawyer_peg_push
 CUDA_VISIBLE_DEVICES=0 python outpace_train.py env=sawyer_peg_push aim_disc_replay_buffer_capacity=30000 normalize_nml_obs=true normalize_f_obs=false normalize_rl_obs=false adam_eps=0.01 hgg_kwargs.match_sampler_kwargs.hgg_L=0.5
 ```
 
-Our code sourced and modified from official implementation of [MURAL](https://github.com/kevintli/mural), [AIM](https://github.com/iDurugkar/adversarial-intrinsic-motivation), and [HGG](https://github.com/Stilwell-Git/Hindsight-Goal-Generation) Algorithm. Also, we utilize [mujoco-maze](https://github.com/kngwyu/mujoco-maze) and [metaworld](https://github.com/rlworkgroup/metaworld) to validate our proposed method.
+Our code sourced and modified from official implementation of [Decision Transformer](https://github.com/kzl/decision-transformer), [OUTPACE](https://github.com/jayLEE0301/outpace_official)[MURAL](https://github.com/kevintli/mural), [AIM](https://github.com/iDurugkar/adversarial-intrinsic-motivation), and [HGG](https://github.com/Stilwell-Git/Hindsight-Goal-Generation) Algorithm. Also, we utilize [mujoco-maze](https://github.com/kngwyu/mujoco-maze) and [metaworld](https://github.com/rlworkgroup/metaworld) to validate our proposed method.
 
 
-
-## Citation
-If you use this repo in your research, please consider citing the paper as follows.
-```
-@inproceedings{choandlee2023outcome,
-  title={Outcome-directed Reinforcement Learning by Uncertainty \& Temporal Distance-Aware Curriculum Goal Generation},
-  author={Cho, Daesol and Lee, Seungjae and Kim, H Jin},
-  booktitle={Proceedings of International Conference on Learning Representations},
-  pages={},
-  year={2023},
-  organization={}
-}
-```
