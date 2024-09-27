@@ -1,4 +1,4 @@
-# OUTPACE
+# Generating curriculum via Decision Transformer in Maze and Robotics environments
 
 This is a Pytorch implementation of **OUTPACE** from our paper: "Outcome-directed Reinforcement Learning by Uncertainty & Temporal Distance-Aware Curriculum Goal Generation" (ICLR 2023 Spotlight)
 
