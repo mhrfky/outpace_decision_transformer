@@ -33,6 +33,11 @@ chmod +x install.sh
 4. Set config_path:
 see config/paths/template.yaml
 
+5. To use decision-transformer, install the following:
+```
+pip install transformers==4.5.1 tokens omegaconf fastdtw tslearn scikit-learn
+conda install cudatoolkit
+```
 5. To run robot arm environment install [metaworld](https://github.com/rlworkgroup/metaworld):
 ```
 pip install git+https://github.com/rlworkgroup/metaworld.git@master#egg=metaworld
