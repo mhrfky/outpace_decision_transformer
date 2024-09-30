@@ -38,7 +38,7 @@ see config/paths/template.yaml
 pip install transformers==4.5.1 tokens omegaconf fastdtw tslearn scikit-learn
 conda install cudatoolkit
 ```
-5. To run robot arm environment install [metaworld](https://github.com/rlworkgroup/metaworld):
+6. To run robot arm environment install [metaworld](https://github.com/rlworkgroup/metaworld):
 ```
 pip install git+https://github.com/rlworkgroup/metaworld.git@master#egg=metaworld
 ```
